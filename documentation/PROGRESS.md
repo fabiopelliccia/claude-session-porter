@@ -9,9 +9,9 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 |---|---|---|---|
 | 0 | Scheletro del repository | fatto | `09e6e2b`. Wrapper 9.7.1, `settings.gradle.kts` radice con solo `includeBuild("core")` (`:cli` lo aggiunge il WP6), CI `./gradlew -p core build`. |
 | 1 | Spostamento del core e split dei bundle | fatto | `5071f52`. 79 test verdi (`./gradlew -p core build` e `./gradlew build`). Vedi note WP1 sotto. |
-| 2 | IntelliJ sul core condiviso (submodule) | da fare | |
-| 3 | Motore di anonimizzazione | fatto | `e84caec`. 126 test verdi (79 + 47 nuovi). Non collegato a `SessionArchive`. Vedi note WP3 sotto. |
-| 4 | Export e manifest formato 2 | da fare | |
+| 2 | IntelliJ sul core condiviso (submodule) | da verificare | `ClaudeSessionRecover`, branch `feature/shared-core`, commit `1c09893` (submodule su `7086d36`). Interrotto mentre girava `verifyPlugin`: rifare `clean test buildPlugin verifyPlugin`, controllare che lo ZIP abbia in `lib/` core e Gson ma non `kotlin-stdlib`. |
+| 3 | Motore di anonimizzazione | fatto, review da rifare | `e84caec`. 126 test verdi (79 + 47 nuovi). Non collegato a `SessionArchive`. Vedi note WP3 sotto. La review Opus del motore è stata interrotta prima di produrre risultati. |
+| 4 | Export e manifest formato 2 | iniziato | Interrotto prima di modificare il codice. Unico prodotto, non committato: `core/src/test/resources/fixtures/format1-alice.zip` (archivio formato 1 per il test di compatibilità; da controllare che sia stato generato dal codice formato 1 attuale prima di usarlo). |
 | 5 | Import del formato 2 | da fare | |
 | 6 | CLI | da fare | |
 | 7 | Plugin Claude Code e marketplace | da fare | |
@@ -33,6 +33,18 @@ proprietario.
 2. Build su Windows (fuori dal sandbox):
    `$env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$PWD\build\uds"; .\gradlew.bat build`
 3. Riprendere dal primo WP non "fatto".
+
+### Ripresa dopo l'interruzione del 2026-10-14 sera
+
+Ordine consigliato (sviluppo con Sonnet, review con Opus, come da CLAUDE.md):
+
+1. **WP4 + WP5** in `ClaudeSessionPorter` (`develops`): rilanciare lo sviluppatore con il brief di PLAN §4.2, §4.3 e §4.5.
+2. In parallelo, **review del WP3** in sola lettura (ricerca di input in cui la home o il nome utente sopravvivono:
+   `\\?\C:\...`, UNC, `file:/C:/`, `\u005c`, OneDrive, maiuscole/minuscole, metacaratteri regex nella radice, pre-filtro).
+   Le correzioni si applicano dopo il WP4/WP5, per non toccare gli stessi file in due.
+3. **WP2**: rifare la verifica sul branch `feature/shared-core` di `ClaudeSessionRecover`; il submodule andrà
+   aggiornato all'ultimo commit di `develops` di questo repository prima del WP9.
+4. Poi WP6 (CLI), WP7 (plugin), WP8, WP9.
 
 ## Bug trovati nel codice esistente
 
