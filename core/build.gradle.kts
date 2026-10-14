@@ -33,6 +33,8 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    // The anonymization performance test holds a 50 MB transcript and its rewrite in memory.
+    maxHeapSize = "1g"
 }
 
 publishing {
