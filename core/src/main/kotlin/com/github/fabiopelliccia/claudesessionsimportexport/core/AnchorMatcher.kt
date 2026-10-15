@@ -61,6 +61,12 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         /** One or more separators that hold a slash: `/`, the JSON-escaped `\/`, or `\u002f`. */
         const val SLASH_SEPARATOR = """(?:\\*+/|\\++u002[fF])++"""
 
+        /**
+         * The one separator an anchor starts with. A single one: in `file:///home/alice` only the last slash
+         * belongs to the anchor, the other two are the URI's and must stay where they are.
+         */
+        const val LEADING_SLASH = """(?:\\*+/|\\++u002[fF])"""
+
         /** What a UNC path starts with: `\\`, `//`, or the extended `\\?\UNC\`, at any escaping level. */
         const val UNC_LEAD = """(?:\\++\?\\++UNC\\++|\\{2,}+|/{2,}+)"""
 
@@ -138,7 +144,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
                 val slashBefore = if (isShortAnchor) SLASH_BEFORE_SHORT_ANCHOR else ""
                 val urlBefore = if (isShortAnchor) URL_BEFORE_SHORT_ANCHOR else ""
                 // /home/alice, also as the JSON-escaped \/home\/alice
-                list += fixed(PathStyle.FWD, slashBefore + chain(SLASH_SEPARATOR, names) + AFTER)
+                list += fixed(PathStyle.FWD, slashBefore + LEADING_SLASH + names.first() + chain(SLASH_SEPARATOR, names.drop(1)) + AFTER)
                 // Claude Code project folder: -home-alice
                 encodedAlternative(encodedFolderName)?.let { list += it }
                 // Percent-encoded: %2Fhome%2Falice
@@ -176,9 +182,9 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         fun gitBashWslAndCygwinAlternatives(driveRegex: String, segments: List<String>, after: String, before: String): List<PathAlternative> {
             val folders = chain(SLASH_SEPARATOR, segments)
             return listOf(
-                fixed(PathStyle.WSL, before + SLASH_SEPARATOR + "mnt" + SLASH_SEPARATOR + driveRegex + folders + after),
-                fixed(PathStyle.CYG, before + SLASH_SEPARATOR + "cygdrive" + SLASH_SEPARATOR + driveRegex + folders + after),
-                fixed(PathStyle.MSYS, before + SLASH_SEPARATOR + driveRegex + folders + after),
+                fixed(PathStyle.WSL, before + LEADING_SLASH + "mnt" + SLASH_SEPARATOR + driveRegex + folders + after),
+                fixed(PathStyle.CYG, before + LEADING_SLASH + "cygdrive" + SLASH_SEPARATOR + driveRegex + folders + after),
+                fixed(PathStyle.MSYS, before + LEADING_SLASH + driveRegex + folders + after),
             )
         }
 

@@ -8,7 +8,8 @@ import java.nio.file.Paths
  *
  * - [home], the `user.home` of the account ([PathKind.HOME]);
  * - [claudeHome], the Claude Code home, kept only when it is not below [home] (otherwise it is already
- *   covered, and `null`) ([PathKind.CLAUDE_HOME]);
+ *   covered, and `null`) or when it is at or below a root (a project that is the home, or holds the Claude
+ *   home, would otherwise take it over: the Claude home is longer, so it wins) ([PathKind.CLAUDE_HOME]);
  * - [roots], the project root of each session to export, which may be anywhere ([PathKind.ROOT]);
  * - [shortHomes], the 8.3 spellings of the home a Windows temp folder can carry (`C:\Users\ALICE~1`);
  * - [userName], the leaf of the home, searched on its own for the residual report.
@@ -17,7 +18,7 @@ import java.nio.file.Paths
  * build one identity (and one [PathAnonymizer]) per session, with that session's single root.
  *
  * Values are normalized like [ClaudePaths.normalizeProjectPath] does (the separator of the path's own
- * style, no trailing separator). A relative path or a UNC share is not an anchor and is ignored.
+ * style, no trailing separator). A relative path is not an anchor and is ignored.
  * [detect] reads the running machine; the constructor takes explicit values, which is what tests use
  * since the real home is never a stable fixture.
  */
@@ -33,10 +34,16 @@ class SourceIdentity(
 
     val roots: List<String> = roots.map(ClaudePaths::normalizeProjectPath).distinct()
 
-    val claudeHome: String? = claudeHome?.let(ClaudePaths::normalizeProjectPath)?.takeUnless { candidate ->
-        val inside = AnchorPath.parse(candidate)
+    /** The Claude home as it was given, so that [withRoots] decides again with the roots it is given. */
+    private val claudeHomeAsGiven: String? = claudeHome?.let(ClaudePaths::normalizeProjectPath)
+
+    val claudeHome: String? = claudeHomeAsGiven?.takeUnless { candidate ->
+        val claudeHomePath = AnchorPath.parse(candidate)
         val homePath = AnchorPath.parse(this.home)
-        inside != null && homePath != null && inside.startsWith(homePath)
+        val coveredByHome = claudeHomePath != null && homePath != null && claudeHomePath.startsWith(homePath)
+        val coveredByRoot = claudeHomePath != null && this.roots.any { root -> AnchorPath.parse(root)?.let(claudeHomePath::startsWith) == true }
+        // Under the home it is covered by the home anchor, unless a root (longer or equal) would take it over.
+        coveredByHome && !coveredByRoot
     }
 
     val shortHomes: List<String> = shortHomes.map(ClaudePaths::normalizeProjectPath).distinct()
@@ -75,7 +82,7 @@ class SourceIdentity(
     }
 
     fun withRoots(roots: List<String>): SourceIdentity =
-        SourceIdentity(home, claudeHome, roots, shortHomes, userName)
+        SourceIdentity(home, claudeHomeAsGiven, roots, shortHomes, userName)
 
     companion object {
 

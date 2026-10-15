@@ -170,6 +170,26 @@ class PathDeanonymizerTest {
         assertEquals("""C:\Users\bob\work\Y\a.txt""", roundTrip("""C:\Users\alice\a.txt""", source))
     }
 
+    // Finding 12: a project that is the home (or holds the Claude home) must not swallow the Claude home.
+    @Test
+    fun `a Claude home below a project root stays an anchor of its own and lands in the destination's Claude home`() {
+        val homeProject = SourceIdentity(home = """C:\Users\alice""", claudeHome = """C:\Users\alice\.claude""", roots = listOf("""C:\Users\alice"""))
+        assertEquals("""C:\Users\alice\.claude""", homeProject.claudeHome)
+        assertEquals("""C:\Users\alice\.claude""", homeProject.withRoots(listOf("""C:\Users\alice""")).claudeHome)
+        // Without a root that holds it, a Claude home below the home is still no anchor.
+        assertEquals(null, homeProject.withRoots(listOf("""C:\Users\alice\IdeaProjects\X""")).claudeHome)
+
+        val source = PathAnonymizer(homeProject)
+        assertEquals("""{{SP:CLAUDE_HOME:win}}\projects\x and {{SP:ROOT:win}}\a.txt""", source.anonymizeText("""C:\Users\alice\.claude\projects\x and C:\Users\alice\a.txt"""))
+        assertEquals(
+            """C:\Users\bob\.claude\projects\x and C:\Users\bob\work\Y\a.txt""",
+            roundTrip("""C:\Users\alice\.claude\projects\x and C:\Users\alice\a.txt""", source),
+        )
+        // A Claude home inside a project that is not the home.
+        val below = SourceIdentity(home = """C:\Users\alice""", claudeHome = """C:\Users\alice\IdeaProjects\X\.claude""", roots = listOf(aliceRoot))
+        assertEquals("""{{SP:CLAUDE_HOME:win}}\projects""", PathAnonymizer(below).anonymizeText("""C:\Users\alice\IdeaProjects\X\.claude\projects"""))
+    }
+
     @Test
     fun `a posix source lands on a windows destination with its separators converted`() {
         val linux = PathAnonymizer(SourceIdentity(home = "/home/alice"))
@@ -193,6 +213,62 @@ class PathDeanonymizerTest {
     @Test
     fun `on windows both ways the tail keeps its separators`() {
         assertEquals("""C:\Users\bob\a/b\c""", roundTrip("""C:\Users\alice\a/b\c"""))
+    }
+
+    // Finding 13: file URIs, the \\?\ prefix and mixed tails when the operating system changes.
+    private val macFromWindows = PathDeanonymizer(root = "/Users/bob/proj", home = "/Users/bob", claudeHome = "/Users/bob/.claude", sourceOs = PathOs.WINDOWS)
+    private val windowsFromLinux = PathDeanonymizer(root = bobRoot, home = """C:\Users\bob""", claudeHome = """C:\Users\bob\.claude""", sourceOs = PathOs.POSIX)
+    private val linux = PathAnonymizer(SourceIdentity(home = "/home/alice", roots = listOf("/home/alice/proj")))
+
+    @Test
+    fun `finding 13 - a file URI of a windows source keeps three slashes on a posix destination`() {
+        assertEquals("file:///Users/bob/x.txt", roundTrip("file:///C:/Users/alice/x.txt", to = macFromWindows))
+        assertEquals("file:///Users/bob/My%20Docs/x.txt", roundTrip("file:///C:/Users/alice/My%20Docs/x.txt", to = macFromWindows))
+        assertEquals("file:///Users/bob/x", roundTrip("file:/C:/Users/alice/x", to = macFromWindows))
+        assertEquals("file://localhost/Users/bob/x", roundTrip("file://localhost/C:/Users/alice/x", to = macFromWindows))
+        assertEquals("file:///Users/bob/x", roundTrip("file:///c%3A/Users/alice/x", to = macFromWindows))
+        // A windows destination keeps what it had.
+        assertEquals("file:///C:/Users/bob/x", roundTrip("file:///C:/Users/alice/x"))
+        assertEquals("file:/C:/Users/bob/x", roundTrip("file:/C:/Users/alice/x"))
+    }
+
+    @Test
+    fun `finding 13 - a file URI of a posix source puts the drive after three slashes on a windows destination`() {
+        assertEquals("file:///C:/Users/bob/x.txt", roundTrip("file:///home/alice/x.txt", linux, windowsFromLinux))
+        assertEquals("file:///C:/Users/bob/My%20Docs/x", roundTrip("file:///home/alice/My%20Docs/x", linux, windowsFromLinux))
+        assertEquals("file:///C:/Users/bob/x", roundTrip("file:///home/alice/x", linux, windowsFromLinux))
+        // A path outside any URI is still a native one.
+        assertEquals("""see C:\Users\bob\work\Y\a.txt, ok""", roundTrip("see /home/alice/proj/a.txt, ok", linux, windowsFromLinux))
+    }
+
+    @Test
+    fun `finding 13 - the extended-length prefix is dropped on a posix destination and kept on windows`() {
+        assertEquals("/Users/bob/x", roundTrip("""\\?\C:\Users\alice\x""", to = macFromWindows))
+        assertEquals("/Users/bob/x", roundTrip("""\\.\C:\Users\alice\x""", to = macFromWindows))
+        assertEquals("/Users/bob/x", roundTrip("""\\\\?\\C:\\Users\\alice\\x""", to = macFromWindows))
+        assertEquals("""\\?\C:\Users\bob\x""", roundTrip("""\\?\C:\Users\alice\x"""))
+    }
+
+    @Test
+    fun `finding 13 - a tail that mixes both separators is converted all the way`() {
+        assertEquals("/Users/bob/sub/dir/x.txt", roundTrip("""C:\Users\alice\sub/dir\x.txt""", to = macFromWindows))
+        assertEquals("/Users/bob/sub/x", roundTrip("""C:/Users\alice\sub\x""", to = macFromWindows))
+        assertEquals("/Users/bob/a/b/c d", roundTrip("""C:\Users\alice\a/b\c d""", to = macFromWindows))
+    }
+
+    // Finding 18: a destination that is a drive root or `/` already ends with a separator.
+    @Test
+    fun `finding 18 - a project that lands on a drive root or on the root of the file system does not double the separator`() {
+        val driveRoot = PathDeanonymizer(root = """D:\""", home = """C:\Users\bob""", claudeHome = """C:\Users\bob\.claude""")
+        assertEquals("""D:\src\a.kt""", roundTrip("""C:\Users\alice\IdeaProjects\X\src\a.kt""", to = driveRoot))
+        assertEquals("""D:\\src\\a.kt""", roundTrip("""C:\\Users\\alice\\IdeaProjects\\X\\src\\a.kt""", to = driveRoot))
+        assertEquals("D:/src/a.kt", roundTrip("C:/Users/alice/IdeaProjects/X/src/a.kt", to = driveRoot))
+        assertEquals("/d/src/a.kt", PathTokens.render(PathKind.ROOT, PathStyle.MSYS).let { driveRoot.deanonymizeText("$it/src/a.kt") })
+        val slashRoot = PathDeanonymizer(root = "/", home = "/home/bob", claudeHome = "/home/bob/.claude")
+        assertEquals("/src/a.kt", roundTrip("/home/alice/proj/src/a.kt", linux, slashRoot))
+        assertEquals("/src/a.kt", roundTrip("""C:\Users\alice\IdeaProjects\X\src\a.kt""", to = slashRoot))
+        // Nothing to drop when the tail is empty or does not start with a separator.
+        assertEquals("""D:\""", roundTrip("""C:\Users\alice\IdeaProjects\X""", to = driveRoot))
     }
 
     // ---------------------------------------------------------------------------------- collision --

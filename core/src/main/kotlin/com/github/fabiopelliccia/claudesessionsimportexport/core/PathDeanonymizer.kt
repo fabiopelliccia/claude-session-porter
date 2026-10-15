@@ -57,6 +57,9 @@ class PathDeanonymizer(
     private class Destination(raw: String) {
         val native: String = ClaudePaths.normalizeProjectPath(raw)
         val path: AnchorPath? = AnchorPath.parse(native)
+
+        /** The drive letter of a destination that is a bare drive (`D:\`): it has no folder, hence no [path]. */
+        val driveRoot: Char? = if (native.length == DRIVE_ROOT_LENGTH && native[1] == ':' && native[2] == '\\') native[0] else null
     }
 
     private val destinations: Map<PathKind, Destination> = buildMap {
@@ -74,6 +77,7 @@ class PathDeanonymizer(
         val windows = os == PathOs.WINDOWS
         val native = destination.native
         val path = destination.path
+        val driveRoot = destination.driveRoot
         return when (style) {
             PathStyle.WIN, PathStyle.SHORT -> native
             PathStyle.FWD ->
@@ -82,12 +86,12 @@ class PathDeanonymizer(
             PathStyle.ESC1, PathStyle.SHORT_ESC1 -> native.replace("\\", "\\".repeat(2))
             PathStyle.ESC2, PathStyle.SHORT_ESC2 -> native.replace("\\", "\\".repeat(4))
             PathStyle.ESC3 -> native.replace("\\", "\\".repeat(8))
-            PathStyle.MSYS -> unixLike(path, "/", windows, native)
-            PathStyle.WSL -> unixLike(path, "/mnt/", windows, native)
-            PathStyle.CYG -> unixLike(path, "/cygdrive/", windows, native)
+            PathStyle.MSYS -> unixLike(path, driveRoot, "/", windows, native)
+            PathStyle.WSL -> unixLike(path, driveRoot, "/mnt/", windows, native)
+            PathStyle.CYG -> unixLike(path, driveRoot, "/cygdrive/", windows, native)
             PathStyle.ENC -> ClaudePaths.encodeProjectPath(native)
-            PathStyle.URL -> url(path, "/", ":", native)
-            PathStyle.URL_BACKSLASH -> url(path, "%5C", "%3A", native)
+            PathStyle.URL -> url(path, driveRoot, "/", ":", native)
+            PathStyle.URL_BACKSLASH -> url(path, driveRoot, "%5C", "%3A", native)
             PathStyle.REL -> withoutDrive(path, native, backslashesPerSeparator = 1)
             PathStyle.REL1 -> withoutDrive(path, native, backslashesPerSeparator = 2)
             PathStyle.REL2 -> withoutDrive(path, native, backslashesPerSeparator = 4)
@@ -117,21 +121,83 @@ class PathDeanonymizer(
                 continue
             }
             if (out == null) out = StringBuilder(text.length + 64)
-            out.append(text, copied, found.start()).append(rendered)
+            val context = contextOf(text, found.start(), copied, style, rendered)
+            out.append(text, copied, context.prefixStart).append(context.prefixReplacement).append(context.rendered)
             stats.renderedByKind.merge(kind.name, 1, Int::plus)
             stats.renderedByStyle.merge(style.token, 1, Int::plus)
             var end = found.end()
-            val separators = tailSeparators(style)
-            if (separators != null && text.startsWith(separators.first, end)) {
-                val tail = convertTail(text, end, separators.first, separators.second)
-                out.append(tail.first)
-                end = tail.second
-            }
+            if (context.convertsTail) end = appendTail(out, text, end, style, context.rendered)
             copied = end
             index = end
         }
         if (out == null) return text
         return out.append(text, copied, text.length).toString()
+    }
+
+    /**
+     * What stands in front of a token and changes how it must be rendered: the text from [prefixStart] to
+     * the token is replaced by [prefixReplacement], the token itself by [rendered].
+     */
+    private class TokenContext(
+        val prefixStart: Int,
+        val prefixReplacement: String,
+        val rendered: String,
+        val convertsTail: Boolean = true,
+    )
+
+    /**
+     * A token is usually rendered as it is. Two prefixes ask for more: a `file:` URI, which has forward
+     * slashes only and puts a drive letter after three of them (`file:///C:/Users/bob`, `file:///Users/bob`),
+     * and the extended-length prefix `\\?\` or `\\.\`, which means nothing on a POSIX destination.
+     */
+    private fun contextOf(text: String, tokenStart: Int, copied: Int, style: PathStyle, rendered: String): TokenContext {
+        val plain = TokenContext(tokenStart, "", rendered)
+        val lookBehindStart = maxOf(copied, tokenStart - PREFIX_LOOK_BEHIND)
+        val before = text.substring(lookBehindStart, tokenStart)
+        if (style == PathStyle.FWD || style == PathStyle.URL) {
+            val fileUri = FILE_URI_PREFIX.find(before) ?: return plain
+            return fileUriContext(lookBehindStart + fileUri.range.first, fileUri.value, rendered)
+        }
+        if (os == PathOs.POSIX && style.backslashes > 0) {
+            val extended = EXTENDED_LENGTH_PREFIX.find(before) ?: return plain
+            return TokenContext(lookBehindStart + extended.range.first, "", rendered)
+        }
+        return plain
+    }
+
+    /** [prefix] is `file:/`, `file://`, `file:///` or `file://host/`; the path is written with forward slashes only. */
+    private fun fileUriContext(prefixStart: Int, prefix: String, rendered: String): TokenContext {
+        val path = rendered.replace('\\', '/')
+        val hasHost = prefix.startsWith("file://") && !prefix.startsWith("file:///") && prefix.length > "file://".length
+        val replacement = when {
+            // file://localhost/ + /Users/bob: the path brings its own slash
+            hasHost -> if (path.startsWith("/")) prefix.dropLast(1) else prefix
+            // file:/, file:// or file:/// + /Users/bob: three slashes in all
+            path.startsWith("/") -> prefix.substring(0, "file:".length) + "//"
+            // file:// + C:/Users/bob: the drive needs a slash of its own
+            prefix.length == "file://".length -> "file:///"
+            else -> prefix
+        }
+        return TokenContext(prefixStart, replacement, path, convertsTail = false)
+    }
+
+    /**
+     * Copies what follows a token and returns where the copy ends. A destination that is a root (`D:\`, `/`)
+     * ends with a separator already, so the tail's first one is dropped; and the tail may be converted to
+     * the destination's separators, see [tailSeparators].
+     */
+    private fun appendTail(out: StringBuilder, text: String, from: Int, style: PathStyle, rendered: String): Int {
+        val separators = tailSeparators(style)
+        val sourceSeparator = separators?.first ?: (if (style.backslashes > 0) "\\".repeat(style.backslashes) else "/")
+        var position = from
+        val dropsFirstSeparator = (rendered.endsWith("\\") || rendered.endsWith("/")) && text.startsWith(sourceSeparator, position)
+        if (dropsFirstSeparator) position += sourceSeparator.length
+        if (separators != null && (dropsFirstSeparator || text.startsWith(separators.first, position))) {
+            val tail = convertTail(text, position, separators.first, separators.second)
+            out.append(tail.first)
+            return tail.second
+        }
+        return position
     }
 
     /**
@@ -157,12 +223,14 @@ class PathDeanonymizer(
     fun deanonymizeJsonl(text: String, stats: Stats = Stats()): String =
         JsonLines.mapLines(text) { deanonymizeJsonLine(it, stats) }
 
-    private fun unixLike(path: AnchorPath?, prefix: String, windows: Boolean, native: String): String {
+    private fun unixLike(path: AnchorPath?, driveRoot: Char?, prefix: String, windows: Boolean, native: String): String {
+        if (windows && driveRoot != null) return prefix + driveRoot.lowercaseChar()
         if (!windows || path?.drive == null) return native
         return prefix + path.drive.lowercaseChar() + path.segments.joinToString("") { "/$it" }
     }
 
-    private fun url(path: AnchorPath?, separator: String, colon: String, native: String): String {
+    private fun url(path: AnchorPath?, driveRoot: Char?, separator: String, colon: String, native: String): String {
+        if (driveRoot != null) return "$driveRoot$colon"
         if (path == null) return native
         val names = path.segments.joinToString("") { separator + percentEncode(it) }
         return if (path.drive != null) "${path.drive}$colon$names" else if (separator == "/") names else "%2F" + path.segments.joinToString("%2F") { percentEncode(it) }
@@ -171,6 +239,8 @@ class PathDeanonymizer(
     /** The source and destination separators of a tail that must be converted, `null` when it is kept. */
     private fun tailSeparators(style: PathStyle): Pair<String, String>? = when {
         os == PathOs.POSIX && style.backslashes > 0 -> "\\".repeat(style.backslashes) to "/"
+        // `C:/Users/alice\sub`: a Windows path that mixes both separators
+        os == PathOs.POSIX && style == PathStyle.FWD && sourceOs == PathOs.WINDOWS -> "\\" to "/"
         os == PathOs.WINDOWS && style == PathStyle.FWD && sourceOs == PathOs.POSIX -> "/" to "\\"
         else -> null
     }
@@ -194,11 +264,26 @@ class PathDeanonymizer(
     }
 
     private companion object {
-        /** Characters that end a path run: a backslash left over is a separator of another level. */
-        const val STOP_CHARS = "\\/\"'`<>|*?:;,{}"
+        /**
+         * Characters that end a path run: a backslash left over is a separator of another level. A slash
+         * does not end it: it is a separator too, a path may mix both (`C:\Users\alice\sub/dir\x.txt`).
+         */
+        const val STOP_CHARS = "\\\"'`<>|*?:;,{}"
+
+        /** How far before a token the prefixes of [contextOf] are looked for. */
+        const val PREFIX_LOOK_BEHIND = 64
+
+        /** `file:/`, `file://`, `file:///` or `file://localhost/`, right before a token. */
+        val FILE_URI_PREFIX = Regex("""file:(?://[^/\s"'<>|]+/|/{1,3})$""", RegexOption.IGNORE_CASE)
+
+        /** `\\?\` or `\\.\`, at any escaping level, right before a token. */
+        val EXTENDED_LENGTH_PREFIX = Regex("""\\{2,}[?.]\\+$""")
 
         /** The length of `C:`. */
         const val DRIVE_PREFIX_LENGTH = 2
+
+        /** The length of `D:\`. */
+        const val DRIVE_ROOT_LENGTH = 3
 
         fun percentEncode(text: String): String {
             val out = StringBuilder()
