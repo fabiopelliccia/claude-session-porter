@@ -48,13 +48,42 @@ class SourceIdentity(
     /**
      * The first six letters and digits of the user name in capitals: the stem Windows gives the 8.3
      * name of a longer folder (`ALICE~1`, `ZOMLLE~1`). Empty when there is none.
+     *
+     * Windows reads a dotted name as base and extension: `alice.smith` becomes `ALICE~1.SMI`, so the
+     * stem is taken from the part before the last dot and [shortExtension] is `SMI`.
      */
-    val shortStem: String = this.userName.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }.take(6)
+    val shortStem: String
+
+    /** The three letters and digits Windows keeps of the part after the last dot (`SMI` for `alice.smith`), empty without a dot. */
+    val shortExtension: String
+
+    /**
+     * Every stem an 8.3 name of the home may start with: [shortStem], and the first six letters and
+     * digits of the whole name with its dots left out (`ALICES` for `alice.smith`), which is not what
+     * Windows does but is accepted anyway, since leaving a home behind costs more than matching too much.
+     */
+    val shortStems: List<String>
+
+    init {
+        val name = this.userName
+        val lastDot = name.lastIndexOf('.')
+        val hasExtension = lastDot in 1 until name.length - 1
+        shortStem = lettersAndDigitsInCapitals(if (hasExtension) name.substring(0, lastDot) else name).take(SHORT_STEM_LENGTH)
+        shortExtension = if (hasExtension) lettersAndDigitsInCapitals(name.substring(lastDot + 1)).take(SHORT_EXTENSION_LENGTH) else ""
+        val wholeNameStem = lettersAndDigitsInCapitals(name).take(SHORT_STEM_LENGTH)
+        shortStems = listOf(shortStem, wholeNameStem).filter { it.isNotEmpty() }.distinct()
+    }
 
     fun withRoots(roots: List<String>): SourceIdentity =
         SourceIdentity(home, claudeHome, roots, shortHomes, userName)
 
     companion object {
+
+        private const val SHORT_STEM_LENGTH = 6
+        private const val SHORT_EXTENSION_LENGTH = 3
+
+        private fun lettersAndDigitsInCapitals(text: String): String =
+            text.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }
 
         /**
          * The running machine: `user.home`, the given Claude home, and the 8.3 spellings found by

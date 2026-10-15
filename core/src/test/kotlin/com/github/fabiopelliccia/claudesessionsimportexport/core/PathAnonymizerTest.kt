@@ -91,8 +91,8 @@ class PathAnonymizerTest {
         assertEquals("{{SP:ROOT:enc}}", posix.anonymizeText("-home-alice-proj-demo"))
         assertEquals("{{SP:HOME:enc}}-other", posix.anonymizeText("-home-alice-other"))
         assertEquals("{{SP:HOME:url}}%2Fx", posix.anonymizeText("%2Fhome%2Falice%2Fx"))
-        // Somebody else's folder that merely ends the same way is not the home.
-        assertEquals("/data/home/alice/x", posix.anonymizeText("/data/home/alice/x"))
+        // A home inside a longer path is replaced too: privacy wins over a cosmetic false positive.
+        assertEquals("/data{{SP:HOME:fwd}}/x", posix.anonymizeText("/data/home/alice/x"))
     }
 
     // ------------------------------------------------------------------------------ precedence --
@@ -299,6 +299,102 @@ class PathAnonymizerTest {
         assertEquals(1, anonymizer.scanBytes(byteArrayOf(0x7f) + wide))
         assertEquals(0, anonymizer.scanBytes(ByteArray(1024) { (it * 31).toByte() }))
         assertEquals(0, anonymizer.scanBytes(ByteArray(0)))
+    }
+
+    // ---------------------------------------------------- review of the engine (REVIEW-WP3.md) --
+
+    private val pelliccia = PathAnonymizer(SourceIdentity(home = """C:\Users\pelliccia"""))
+    private val macAlice = PathAnonymizer(SourceIdentity(home = "/Users/alice", roots = listOf("/Users/alice/proj")))
+
+    // Finding 1: the 8.3 home in the other spellings, not only as "<drive>:" plus separators.
+    @Test
+    fun `finding 1 - a short 8-3 home in Git Bash, WSL, Cygwin, encoded and eight-backslash spellings`() {
+        assertEquals(
+            "{{SP:HOME:msys}}/AppData/Local/Temp/claude/{{SP:HOME:enc}}-IdeaProjects-x/scratchpad",
+            pelliccia.anonymizeText("/c/Users/PELLIC~1/AppData/Local/Temp/claude/C--Users-pelliccia-IdeaProjects-x/scratchpad"),
+        )
+        assertEquals("{{SP:HOME:wsl}}/AppData", anonymizer.anonymizeText("/mnt/c/Users/ALICE~1/AppData"))
+        assertEquals("{{SP:HOME:cyg}}/AppData", anonymizer.anonymizeText("/cygdrive/c/Users/ALICE~1/AppData"))
+        assertEquals("{{SP:HOME:enc}}-AppData-Local-Temp-x", pelliccia.anonymizeText("C--Users-PELLIC-1-AppData-Local-Temp-x"))
+        assertEquals("""{{SP:HOME:esc3}}\\\\\\\\x""", anonymizer.anonymizeText("""C:\\\\\\\\Users\\\\\\\\ALICE~1\\\\\\\\x"""))
+    }
+
+    @Test
+    fun `finding 1 - a short home read from a temp folder is found in the Git Bash spelling too`() {
+        val withExplicitShort = PathAnonymizer(SourceIdentity(home = home, shortHomes = listOf("""C:\Users\ZO5F2~1""")))
+        assertEquals("{{SP:HOME:msys}}/AppData", withExplicitShort.anonymizeText("/c/Users/ZO5F2~1/AppData"))
+        assertEquals("{{SP:HOME:enc}}-AppData", withExplicitShort.anonymizeText("C--Users-ZO5F2-1-AppData"))
+    }
+
+    // Finding 2: a letter or digit before the anchor must not hide it.
+    @Test
+    fun `finding 2 - an anchor glued to a flag, an ANSI colour or a longer path is still found`() {
+        assertEquals("""gcc -I{{SP:HOME:win}}\inc""", anonymizer.anonymizeText("""gcc -IC:\Users\alice\inc"""))
+        // A real ESC character, and the same colour as a JSON writer spells it, seen in raw text.
+        assertEquals("\u001b[34m{{SP:HOME:win}}\\proj\u001b[0m", anonymizer.anonymizeText("\u001b[34mC:\\Users\\alice\\proj\u001b[0m"))
+        assertEquals("""\u001b[34m{{SP:HOME:win}}\proj""", anonymizer.anonymizeText("""\u001b[34mC:\Users\alice\proj"""))
+        assertEquals("/System/Volumes/Data{{SP:ROOT:fwd}}/a", macAlice.anonymizeText("/System/Volumes/Data/Users/alice/proj/a"))
+        assertEquals("docker: /host_mnt{{SP:ROOT:fwd}}", macAlice.anonymizeText("docker: /host_mnt/Users/alice/proj"))
+        assertEquals("clang -I{{SP:HOME:fwd}}/include", macAlice.anonymizeText("clang -I/Users/alice/include"))
+        assertEquals("/var{{SP:HOME:fwd}}/x", PathAnonymizer(SourceIdentity(home = "/home/alice")).anonymizeText("/var/home/alice/x"))
+        assertEquals("file%3A%2F%2F{{SP:HOME:url}}%2Fx", macAlice.anonymizeText("file%3A%2F%2F%2FUsers%2Falice%2Fx"))
+    }
+
+    @Test
+    fun `finding 2 - a one-folder anchor keeps its boundaries, relaxed for a flag and a colour`() {
+        val oneFolder = PathAnonymizer(SourceIdentity(home = "/home/alice", roots = listOf("/work")))
+        assertEquals("{{SP:ROOT:fwd}}/x", oneFolder.anonymizeText("/work/x"))
+        assertEquals("/usr/network/work/x", oneFolder.anonymizeText("/usr/network/work/x"))
+        assertEquals("cc -I{{SP:ROOT:fwd}}/x", oneFolder.anonymizeText("cc -I/work/x"))
+    }
+
+    // Finding 9: any mix of separators between the folders, the first one gives the style.
+    @Test
+    fun `finding 9 - mixed and escaped separators are matched and the first one gives the style`() {
+        assertEquals("""{{SP:HOME:fwd}}\/x""", anonymizer.anonymizeText("""C:\/Users\/alice\/x"""))
+        assertEquals("{{SP:HOME:esc1}}", anonymizer.anonymizeText("""C:\\Users/alice"""))
+        assertEquals("{{SP:HOME:win}}", anonymizer.anonymizeText("""C:\Users\\alice"""))
+        assertEquals("{{SP:HOME:fwd}}", anonymizer.anonymizeText("C://Users//alice"))
+        assertEquals("""{{SP:HOME:esc1}}\x""", anonymizer.anonymizeText("""C:\u005cUsers\u005calice\x"""))
+    }
+
+    // Finding 11: the Windows 8.3 rule for a dotted name, alice.smith -> ALICE~1.SMI.
+    @Test
+    fun `finding 11 - the 8-3 name of a dotted user name carries an extension`() {
+        val dotted = SourceIdentity(home = """C:\Users\alice.smith""")
+        assertEquals("ALICE", dotted.shortStem)
+        val dottedAnonymizer = PathAnonymizer(dotted)
+        assertEquals("""{{SP:HOME:short}}\AppData""", dottedAnonymizer.anonymizeText("""C:\Users\ALICE~1.SMI\AppData"""))
+        assertEquals("{{SP:HOME:msys}}/AppData", dottedAnonymizer.anonymizeText("/c/Users/ALICE~1.SMI/AppData"))
+        // The engine's former guess, the first six letters of the whole name, is still accepted.
+        assertEquals("""{{SP:HOME:short}}\x""", dottedAnonymizer.anonymizeText("""C:\Users\ALICES~1\x"""))
+        // The residual check looks at the dot-separated parts of the name.
+        val stats = PathAnonymizer.Stats()
+        dottedAnonymizer.anonymizeText("alice pushed users/alice/fix", stats)
+        assertEquals(2, stats.residualUserNameHits)
+    }
+
+    // Finding 14: a hyphen followed by a name character belongs to the name, in the plain styles.
+    @Test
+    fun `finding 14 - a name continued by a hyphen is another folder`() {
+        assertEquals(
+            """{{SP:HOME:win}}\IdeaProjects\X-v2\a.txt""",
+            anonymizer.anonymizeText("""C:\Users\alice\IdeaProjects\X-v2\a.txt"""),
+        )
+        val stats = PathAnonymizer.Stats()
+        assertEquals("""C:\Users\alice-admin\a.txt""", anonymizer.anonymizeText("""C:\Users\alice-admin\a.txt""", stats))
+        // Not silent: the bare name is reported.
+        assertEquals(1, stats.residualUserNameHits)
+        // A hyphen that does not continue the name is a boundary.
+        assertEquals("{{SP:HOME:win}}- x", anonymizer.anonymizeText("""C:\Users\alice- x"""))
+        // The encoded form joins its folders with hyphens, so there a hyphen is still a boundary.
+        assertEquals("{{SP:HOME:enc}}-Other", anonymizer.anonymizeText("C--Users-alice-Other"))
+    }
+
+    // Finding 16: the encoded form after a literal "\n" of raw JSON text.
+    @Test
+    fun `finding 16 - an encoded project folder after a json newline escape is found in raw text`() {
+        assertEquals("""ls\n{{SP:ROOT:enc}}\n""", anonymizer.anonymizeText("""ls\nC--Users-alice-IdeaProjects-X\n"""))
     }
 
     // ------------------------------------------------------------------------------ performance --

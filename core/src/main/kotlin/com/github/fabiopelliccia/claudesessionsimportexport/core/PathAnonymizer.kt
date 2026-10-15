@@ -76,9 +76,7 @@ class PathAnonymizer(
             AnchorMatcher(kind, path, if (kind == PathKind.HOME) shorts else emptyList())
         }
         needles = needlesOf(anchors.map { it.second }, identity, shorts)
-        residual = identity.userName.takeIf { it.length >= MIN_RESIDUAL_LENGTH }?.let {
-            Pattern.compile("(?<![\\p{L}\\p{N}_])" + Pattern.quote(it) + "(?![\\p{L}\\p{N}_])", Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE)
-        }
+        residual = residualPatternOf(identity.userName)
     }
 
     /**
@@ -173,18 +171,54 @@ class PathAnonymizer(
     private companion object {
         const val MIN_RESIDUAL_LENGTH = 4
 
-        /** The explicit 8.3 homes plus the generic `<drive>:\Users\<STEM>~<n>` fallback, Windows only. */
+        /**
+         * The whole-word search for the bare user name, or `null` for a name too short to be told from
+         * ordinary words. A dotted name (`alice.smith`, a corporate account) is looked for as a whole and
+         * by each of its parts, since a conversation says "alice" more often than "alice.smith".
+         */
+        fun residualPatternOf(userName: String): Pattern? {
+            val names = residualNamesOf(userName)
+            if (names.isEmpty()) return null
+            val alternatives = names.joinToString("|") { PathNamePatterns.plain(it) }
+            return Pattern.compile("(?<![\\p{L}\\p{N}_])(?:$alternatives)(?![\\p{L}\\p{N}_])", Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE)
+        }
+
+        /** The user name and, for a dotted one, its dot-separated parts: what the residual check looks for. Empty for a short name. */
+        fun residualNamesOf(userName: String): List<String> {
+            if (userName.length < MIN_RESIDUAL_LENGTH) return emptyList()
+            val parts = userName.split('.').filter { it != userName && it.length >= MIN_RESIDUAL_LENGTH }
+            return listOf(userName) + parts
+        }
+
+        /**
+         * The explicit 8.3 homes plus the generic `<drive>:\Users\<STEM>~<n>[.<EXT>]` fallback for each
+         * stem of the identity (see [SourceIdentity.shortStems]), Windows only.
+         */
         fun shortPatterns(identity: SourceIdentity): List<ShortPattern> {
             if (identity.os != PathOs.WINDOWS) return emptyList()
             val list = mutableListOf<ShortPattern>()
             for (short in identity.shortHomes) {
                 val path = AnchorPath.parse(short) ?: continue
-                list += ShortPattern(path.drive.toString(), path.segments.map { Pattern.quote(it) })
+                val drive = path.drive ?: continue
+                list += ShortPattern(drive.toString(), path.segments.map { Pattern.quote(it) }, Pattern.quote(ClaudePaths.encodeProjectPath(short)))
             }
-            if (identity.shortStem.isNotEmpty()) {
-                list += ShortPattern("[A-Za-z]", listOf(Pattern.quote("Users"), Pattern.quote(identity.shortStem) + "~[0-9]+"))
+            // The folders above the home are spelled in full (`Users`): only the home's own name gets an 8.3 name.
+            val foldersAboveHome = AnchorPath.parse(identity.home)?.segments?.dropLast(1).orEmpty()
+            for (stem in identity.shortStems) {
+                list += genericShortPattern(foldersAboveHome, stem, identity.shortExtension)
             }
             return list
+        }
+
+        /** `<any drive>:\<folders>\STEM~<n>`, with the extension of a dotted name optional (`ALICE~1.SMI`). */
+        fun genericShortPattern(foldersAboveHome: List<String>, stem: String, extension: String): ShortPattern {
+            val optionalExtension = if (extension.isEmpty()) "" else "(?:\\." + Pattern.quote(extension) + ")?"
+            val optionalEncodedExtension = if (extension.isEmpty()) "" else "(?:-" + Pattern.quote(extension) + ")?"
+            val shortName = Pattern.quote(stem) + "~[0-9]+" + optionalExtension
+            val encodedFolders = foldersAboveHome.joinToString("") { "-" + Pattern.quote(ClaudePaths.encodeProjectPath(it)) }
+            // The 8.3 name `ALICE~1` reads `ALICE-1` once encoded as a project folder name.
+            val encoded = "[A-Za-z]-" + encodedFolders + "-" + Pattern.quote(stem) + "-[0-9]+" + optionalEncodedExtension
+            return ShortPattern("[A-Za-z]", foldersAboveHome.map { Pattern.quote(it) } + shortName, encoded)
         }
 
         fun needlesOf(anchors: List<AnchorPath>, identity: SourceIdentity, shorts: List<ShortPattern>): List<String> {
@@ -196,14 +230,15 @@ class PathAnonymizer(
             // a project root under the home names the home), so its own leaf, often a one-letter
             // `src` or `X`, would only let every line through the filter.
             val outermost = anchors.filter { anchor -> anchors.none { other -> other !== anchor && anchor.startsWith(other) } }
-            for (leaf in outermost.map { it.leaf } + identity.userName) {
+            for (leaf in outermost.map { it.leaf } + identity.userName + residualNamesOf(identity.userName)) {
                 add(leaf)
                 add(ClaudePaths.encodeProjectPath(leaf))
                 add(percentEncode(leaf))
                 add(jsonEscape(leaf))
             }
-            add(identity.shortStem)
-            identity.shortHomes.mapNotNull { AnchorPath.parse(it)?.leaf }.forEach(::add)
+            identity.shortStems.forEach(::add)
+            // `ZO5F2~1` is `ZO5F2-1` as a project folder name: only what comes before the tilde is in every spelling.
+            identity.shortHomes.mapNotNull { AnchorPath.parse(it)?.leaf?.substringBefore('~') }.forEach(::add)
             return names.toList()
         }
 
