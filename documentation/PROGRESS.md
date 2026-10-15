@@ -13,8 +13,8 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 | 3 | Motore di anonimizzazione | fatto | `e84caec`; correzioni dei 19 rilievi di [`REVIEW-WP3.md`](REVIEW-WP3.md) in `6a1b8e3`..`58400a7` (8 commit). 182 test verdi, nessuno saltato. Vedi note WP3 sotto. |
 | 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
 | 5 | Import del formato 2 | fatto | `a6605af`; correzioni dei 13 rilievi e delle lacune nei test di [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) in `16e9cd5`..`cc89608` (9 commit). 247 test verdi, nessuno saltato. Vedi note WP4/WP5 sotto. |
-| 6 | CLI | fatto, correzioni della review in corso | `98f8e6a`..`19b590f` (4 commit). `./gradlew build` dalla radice costruisce e testa core (247) e CLI (81). Jar riproducibile `session-porter.jar` (2.595.811 byte, SHA-256 `0f94c25d…0c52b53b`). Review Opus: 13 rilievi in [`REVIEW-WP6.md`](REVIEW-WP6.md). Vedi note WP6 sotto. |
-| 7 | Plugin Claude Code e marketplace | fatto, prova interattiva del proprietario da fare | `5c720e1`. `claude plugin validate` (marketplace e plugin, anche `--strict`) superato; `plugin/tests/test-launchers.sh` 115/115 su Git Bash e pwsh. Jar in `plugin/lib/` escluso da git fino al WP8. Vedi note WP7 sotto. |
+| 6 | CLI | fatto | `98f8e6a`..`19b590f`; correzioni dei 13 rilievi di [`REVIEW-WP6.md`](REVIEW-WP6.md) in `d59b8cd`..`5fe1b3b`. Test: core 254, CLI 123, tutti verdi; `./gradlew test` dalla radice ora esegue anche il core. Jar `session-porter.jar` 2.619.495 byte, SHA-256 `cbefc40a…2f31bbba59`, uguale in due build pulite e con checkout CRLF o LF. CI con job ubuntu e windows (mai eseguita: niente push). Vedi note WP6 sotto. |
+| 7 | Plugin Claude Code e marketplace | fatto, prova interattiva del proprietario da fare | `5c720e1`, `e2647e1` (argomenti in `SESSION_PORTER_ARGS`). `claude plugin validate` superato (anche `--strict`); `plugin/tests/test-launchers.sh` 130/130 su Git Bash e pwsh. Jar `cbefc40a…` in `plugin/lib/`, escluso da git fino al WP8. Vedi note WP7 sotto. |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
 | 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | annullato | Decisione del 2026-10-15: il plugin IntelliJ non avrà nuove versioni oltre la 1.0.1. |
 
@@ -40,14 +40,11 @@ proprietario.
 
 ### Ripresa (aggiornato il 2026-10-15, pomeriggio)
 
-Core, CLI (WP6) e plugin (WP7) fatti; WP2 abbandonato, WP9 annullato. In corso:
+Core, CLI (WP6, con le correzioni) e plugin (WP7) fatti; WP2 abbandonato, WP9 annullato. Prossimi passi:
 
-1. **Correzioni della review del WP6** ([`REVIEW-WP6.md`](REVIEW-WP6.md)) in `cli/` (e `LogFiles` del core), senza toccare `plugin/`
-   mentre il proprietario prova il plugin; le modifiche a launcher e skill che servono (rilievo 6) vanno applicate dopo la prova,
-   poi va ricopiato il jar in `plugin/lib/`.
-2. **Prova interattiva del proprietario**: `claude --plugin-dir ./plugin`, poi la scheda Code di Claude Desktop (passi in
-   "Note WP7").
-3. **WP8** (rilascio e documentazione).
+1. **Prova interattiva del proprietario**: `claude --plugin-dir ./plugin`, poi la scheda Code di Claude Desktop (passi in
+   "Note WP7"); correggere quello che emerge.
+2. **WP8** (rilascio e documentazione).
 
 ## Bug trovati nel codice esistente
 
@@ -234,3 +231,21 @@ Limiti noti:
 - Launcher: codice extra 4 `JAR_NOT_FOUND`; senza `--json` stampa testo su stderr. Avvio 2-3 s (soprattutto `java -XshowSettings`).
 - Da verificare solo con la prova interattiva: gli skill stessi, la sostituzione di `${CLAUDE_PLUGIN_ROOT}` e `${CLAUDE_SESSION_ID}`,
   le regole di permesso, se le sessioni importate compaiono nella barra laterale dell'app o solo con `/resume` (rischio 4).
+
+### Correzioni della review WP6 (2026-10-15)
+
+- Argomenti Unicode su Windows: il launcher mette tutti gli argomenti, uno per riga, nella variabile `SESSION_PORTER_ARGS` e
+  avvia java senza argv (java.exe riceve l'argv nella code page ANSI e riespande `*`/`?`). La CLI legge la variabile solo se l'argv
+  è vuoto; un argomento con un a capo o oltre 30000 caratteri torna all'argv normale.
+- Nuovi codici: `interrupted` (uscita **130**, hook di arresto che cancella i file temporanei; non copre TerminateProcess e
+  lascia la cartella di staging dell'import), `outOfMemory` (10), `archiveTooNew` (3), `idsFromConsole` (2). `noSessions` anche
+  per `import --ids ""`; `invalidPath` per ogni percorso vuoto; `invalidSince` per `--since` fuori scala; `ioError` anche per
+  `UncheckedIOException`; `command` valorizzato negli errori d'uso dopo il comando; archivi classificati per tipo d'eccezione
+  (core `UnusableArchiveException`).
+- L'archivio in preparazione sta nella cartella temporanea di sistema e va nella destinazione solo se accettato (copia ed
+  eliminazione se su un altro volume); le cartelle create per `--out` vengono tolte se l'export fallisce o è rifiutato.
+- `--project` confronta il percorso registrato (il nome della cartella Claude solo se manca); `--project` e `--target` esistenti
+  passano da `toRealPath` (8.3 e maiuscole come sul disco). Warning e avanzamento citano le sessioni per id (core
+  `SessionLabeler`, default `TITLE`, la CLI usa `ID`).
+- `LogFiles.rotate` tocca solo `<prefix>-yyyyMMdd-HHmmss[-n].log`; due run nello stesso secondo non si sovrascrivono.
+- Jar: risorse `*.properties`/`*.txt` normalizzate a LF nella build, `.gitattributes` con `*.txt text eol=lf`.
