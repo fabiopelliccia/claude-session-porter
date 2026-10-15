@@ -3,14 +3,31 @@ package com.github.fabiopelliccia.claudesessionsimportexport.core
 import java.util.regex.Matcher
 import java.util.regex.Pattern
 
-/** A way an anchor shows up in text: the regex (no capturing group inside) and the style it stands for. */
-internal class PathAlternative(val regex: String, val style: (String) -> PathStyle)
+/**
+ * What the first character of a match can be, so that the matcher can skip a position without trying the
+ * alternatives: either a set of characters (a letter stands for both of its cases), or any letter that is
+ * followed by a colon or a hyphen (the 8.3 forms on any drive: `X:\Users\...`, `X--Users-...`).
+ */
+internal class AlternativeStart private constructor(val characters: Set<Char>, val isAnyLetterBeforeColonOrHyphen: Boolean) {
+
+    companion object {
+        fun characters(members: String) = AlternativeStart(members.toSet(), false)
+
+        val ANY_LETTER_BEFORE_COLON_OR_HYPHEN = AlternativeStart(emptySet(), true)
+    }
+}
+
+/** A way an anchor shows up in text: the regex (no capturing group inside), how it starts and the style it stands for. */
+internal class PathAlternative(val regex: String, val start: AlternativeStart, val style: (String) -> PathStyle)
 
 /**
- * The 8.3 spelling of a home folder, as regex fragments: its [drive] letter, the folder names
- * ([segments]) and the same path as a Claude Code folder name ([encoded]).
+ * The 8.3 spelling of a home folder, as regex fragments: its [drive] letter (a letter, or `[A-Za-z]` for any
+ * drive), the folder names ([segments]) and the same path as a Claude Code folder name ([encoded]).
  */
-internal class ShortPattern(val drive: String, val segments: List<String>, val encoded: String)
+internal class ShortPattern(val drive: String, val segments: List<String>, val encoded: String) {
+
+    val isOnAnyDrive: Boolean get() = drive.length > 1
+}
 
 /**
  * Every spelling of one anchor, as one regex of alternatives (each in its own capturing group, so the
@@ -18,8 +35,8 @@ internal class ShortPattern(val drive: String, val segments: List<String>, val e
  *
  * **Separators.** Between two folder names any run of backslashes and slashes is accepted, in any mix
  * (`C:\Users/alice`, `C:\\Users\\alice`, `C:\/Users\/alice`, `C://Users//alice`), and so is a backslash
- * written as the JSON escape `\u005c`. The first separator gives the style: one backslash is `win`,
- * two `esc1`, four `esc2`, eight `esc3`, a slash `fwd`.
+ * written as the JSON escape for it (a backslash and `u005c`). The first separator gives the style: one
+ * backslash is `win`, two `esc1`, four `esc2`, eight `esc3`, a slash `fwd`.
  *
  * **Boundaries.** Before the anchor: an anchor of two or more folders (`C:\Users\alice`, `/home/alice`)
  * is recognised whatever precedes it, because a home inside a longer path (`/var/home/alice`,
@@ -30,18 +47,87 @@ internal class ShortPattern(val drive: String, val segments: List<String>, val e
  * `alice2`, `alice.bak`, `alice-admin` and `ALICE~1` are no `alice`, while a sentence's final dot is
  * not part of the name. The encoded form joins its folders with hyphens, so there any character but a
  * letter or digit bounds the name.
+ *
+ * **Speed.** The regex is only tried at the positions where an alternative can start (see
+ * [AlternativeStart]), found with a table lookup per character, instead of at every position: that is the
+ * difference between a minute and a few seconds on a transcript of 50 MB.
  */
 internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatterns: List<ShortPattern>) {
 
     private val alternatives: List<PathAlternative> = build(path, shortPatterns, withoutDrive = kind == PathKind.HOME && path.drive != null)
 
-    val pattern: Pattern = Pattern.compile(
+    private val pattern: Pattern = Pattern.compile(
         alternatives.joinToString("|") { "(${it.regex})" },
         Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE,
     )
 
+    /** Which ASCII characters an alternative can start with, in either case. */
+    private val canStartMatch = BooleanArray(ASCII_SIZE)
+
+    private val canStartWithAnyLetter: Boolean = alternatives.any { it.start.isAnyLetterBeforeColonOrHyphen }
+
+    init {
+        for (alternative in alternatives) {
+            for (character in alternative.start.characters) {
+                canStartMatch[character.lowercaseChar().code] = true
+                canStartMatch[character.uppercaseChar().code] = true
+            }
+        }
+    }
+
+    /**
+     * Calls [onMatch] with the start, the end and the style of every match in [text], from left to right,
+     * none overlapping; the same matches `Matcher.find` would find, without trying the regex at every position.
+     */
+    fun forEachMatch(text: String, onMatch: (start: Int, end: Int, style: PathStyle) -> Unit) {
+        // Transparent bounds: what comes before the position is still seen by the boundaries of the pattern.
+        val matcher = pattern.matcher(text).useTransparentBounds(true).useAnchoringBounds(false)
+        var position = 0
+        while (position < text.length) {
+            val candidate = nextCandidate(text, position)
+            if (candidate < 0) return
+            matcher.region(candidate, text.length)
+            if (matcher.lookingAt()) {
+                onMatch(candidate, matcher.end(), styleOf(matcher))
+                position = maxOf(matcher.end(), candidate + 1)
+            } else {
+                position = candidate + 1
+            }
+        }
+    }
+
+    /** The first position at or after [from] where a match can start, `-1` when there is none. */
+    private fun nextCandidate(text: String, from: Int): Int {
+        for (index in from until text.length) {
+            val character = text[index]
+            if (canStartAt(character)) return index
+            if (canStartWithAnyLetter && isLetterBeforeColonOrHyphen(text, index)) return index
+        }
+        return -1
+    }
+
+    private fun canStartAt(character: Char): Boolean {
+        if (character.code < ASCII_SIZE) return canStartMatch[character.code]
+        // The regex ignores case with Unicode rules: the Kelvin sign is a K, the long s an s.
+        val folded = Character.toLowerCase(Character.toUpperCase(character))
+        return folded.code < ASCII_SIZE && canStartMatch[folded.code]
+    }
+
+    private fun isLetterBeforeColonOrHyphen(text: String, index: Int): Boolean {
+        if (index + 1 >= text.length) return false
+        val next = text[index + 1]
+        if (next != ':' && next != '-') return false
+        val character = text[index]
+        return character in 'A'..'Z' || character in 'a'..'z' || (character.code >= ASCII_SIZE && canStartAtAnyLetter(character))
+    }
+
+    private fun canStartAtAnyLetter(character: Char): Boolean {
+        val folded = Character.toLowerCase(Character.toUpperCase(character))
+        return folded in 'a'..'z'
+    }
+
     /** The style of the alternative that just matched. */
-    fun styleOf(matcher: Matcher): PathStyle {
+    private fun styleOf(matcher: Matcher): PathStyle {
         for (index in alternatives.indices) {
             if (matcher.start(index + 1) >= 0) return alternatives[index].style(matcher.group(index + 1))
         }
@@ -54,11 +140,11 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
 
         /**
          * One or more separators of any kind: a run of backslashes, which may end in the JSON escape of
-         * a backslash or slash (`\u005c`, `\u002f`), or a slash.
+         * a backslash or slash (u005c, u002f after the run), or a slash.
          */
         const val ANY_SEPARATOR = """(?:\\++(?:u00(?:5[cC]|2[fF]))?|/)++"""
 
-        /** One or more separators that hold a slash: `/`, the JSON-escaped `\/`, or `\u002f`. */
+        /** One or more separators that hold a slash: `/`, the JSON-escaped `\/`, or the escape u002f after a backslash. */
         const val SLASH_SEPARATOR = """(?:\\*+/|\\++u002[fF])++"""
 
         /**
@@ -70,7 +156,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         /** What a UNC path starts with: `\\`, `//`, or the extended `\\?\UNC\`, at any escaping level. */
         const val UNC_LEAD = """(?:\\++\?\\++UNC\\++|\\{2,}+|/{2,}+)"""
 
-        /** A path without its drive starts with a backslash (also written as the JSON escape `\`). */
+        /** A path without its drive starts with a backslash (or its u005c escape). */
         const val ROOT_RELATIVE_LEAD = """\\++(?:u005[cC])?"""
 
         const val URL_SEPARATOR = "(?:/|%2[Ff])"
@@ -82,7 +168,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         /** The `n`, `t` or `r` of a JSON escape seen in raw text: `...\nC:\\Users`. */
         const val JSON_ESCAPE_BEFORE = """(?<=\\[ntr])"""
 
-        /** The end of an ANSI colour sequence: ESC[34m (also as the raw JSON text `\u001b[34m`). */
+        /** The end of an ANSI colour sequence: ESC[34m (also as the raw JSON text of the ESC character). */
         const val ANSI_COLOUR_BEFORE = """(?<=\[[0-9;]{0,12}m)"""
 
         /** A compiler or tool flag glued to the path: `-IC:\Users\alice\inc`, `-L/home/alice/lib`. */
@@ -105,7 +191,17 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         const val AFTER_ENC = """(?![A-Za-z0-9_]|\.[A-Za-z0-9_])"""
         const val AFTER_URL = """(?![\p{L}\p{N}_~]|[.\-][\p{L}\p{N}_]|%(?!2[Ff]|5[Cc])[0-9A-Fa-f]{2})"""
 
-        fun fixed(style: PathStyle, regex: String) = PathAlternative(regex) { style }
+        // ---- How an alternative starts, to find the positions worth trying.
+
+        const val ASCII_SIZE = 128
+
+        val SLASH_OR_BACKSLASH_START = AlternativeStart.characters("""/\""")
+        val BACKSLASH_START = AlternativeStart.characters("""\""")
+        val SLASH_OR_PERCENT_START = AlternativeStart.characters("/%")
+
+        fun startingWith(character: Char) = AlternativeStart.characters(character.toString())
+
+        fun fixed(style: PathStyle, regex: String, start: AlternativeStart) = PathAlternative(regex, start) { style }
 
         fun chain(separator: String, parts: List<String>) = parts.joinToString("") { separator + it }
 
@@ -124,38 +220,39 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
                 val driveBefore = if (isShortAnchor) DRIVE_BEFORE_SHORT_ANCHOR else ""
                 val slashBefore = if (isShortAnchor) SLASH_BEFORE_SHORT_ANCHOR else ""
                 val urlBefore = if (isShortAnchor) URL_BEFORE_SHORT_ANCHOR else ""
+                val startsWithDrive = startingWith(drive)
 
                 for (short in shortPatterns) list += shortHomeAlternatives(short)
                 list += gitBashWslAndCygwinAlternatives(drive.toString(), names, AFTER, slashBefore)
                 // C:\Users\alice, C:/Users/alice, C:\\Users\\alice, ... (the style is the first separator's)
-                list += PathAlternative(driveBefore + drive + ":" + chain(ANY_SEPARATOR, names) + AFTER) { match -> styleOfSeparator(match, 2) }
+                list += PathAlternative(driveBefore + drive + ":" + chain(ANY_SEPARATOR, names) + AFTER, startsWithDrive) { match -> styleOfSeparator(match, 2) }
                 // Claude Code project folder: C--Users-alice
                 encodedAlternative(encodedFolderName)?.let { list += it }
                 // Percent-encoded: C%3A%5CUsers%5Calice, and C:/Users/alice or C%3A%2FUsers%2Falice
-                list += fixed(PathStyle.URL_BACKSLASH, urlBefore + drive + URL_COLON + chain(URL_BACKSLASH_SEPARATOR, urlNames) + AFTER_URL)
-                list += fixed(PathStyle.URL, urlBefore + drive + URL_COLON + chain(URL_SEPARATOR, urlNames) + AFTER_URL)
+                list += fixed(PathStyle.URL_BACKSLASH, urlBefore + drive + URL_COLON + chain(URL_BACKSLASH_SEPARATOR, urlNames) + AFTER_URL, startsWithDrive)
+                list += fixed(PathStyle.URL, urlBefore + drive + URL_COLON + chain(URL_SEPARATOR, urlNames) + AFTER_URL, startsWithDrive)
                 if (withoutDrive) list += withoutDriveAlternative(names)
             } else if (path.isUnc) {
                 // \\server\share\alice, //server/share/alice, \\?\UNC\server\share\alice, with doubled backslashes inside JSON
-                list += PathAlternative(UNC_LEAD + names.first() + chain(ANY_SEPARATOR, names.drop(1)) + AFTER) { match -> styleOfUncLead(match) }
+                list += PathAlternative(UNC_LEAD + names.first() + chain(ANY_SEPARATOR, names.drop(1)) + AFTER, SLASH_OR_BACKSLASH_START) { match -> styleOfUncLead(match) }
                 // Claude Code project folder: --server-share-alice
                 encodedAlternative(encodedFolderName)?.let { list += it }
             } else {
                 val slashBefore = if (isShortAnchor) SLASH_BEFORE_SHORT_ANCHOR else ""
                 val urlBefore = if (isShortAnchor) URL_BEFORE_SHORT_ANCHOR else ""
                 // /home/alice, also as the JSON-escaped \/home\/alice
-                list += fixed(PathStyle.FWD, slashBefore + LEADING_SLASH + names.first() + chain(SLASH_SEPARATOR, names.drop(1)) + AFTER)
+                list += fixed(PathStyle.FWD, slashBefore + LEADING_SLASH + names.first() + chain(SLASH_SEPARATOR, names.drop(1)) + AFTER, SLASH_OR_BACKSLASH_START)
                 // Claude Code project folder: -home-alice
                 encodedAlternative(encodedFolderName)?.let { list += it }
                 // Percent-encoded: %2Fhome%2Falice
-                list += fixed(PathStyle.URL, urlBefore + chain(URL_SEPARATOR, urlNames) + AFTER_URL)
+                list += fixed(PathStyle.URL, urlBefore + chain(URL_SEPARATOR, urlNames) + AFTER_URL, SLASH_OR_PERCENT_START)
             }
             return list
         }
 
         /** `\Users\alice` (HOMEPATH): backslashes only, as a slash would be any POSIX path; the level is the lead's. */
         fun withoutDriveAlternative(names: List<String>): PathAlternative =
-            PathAlternative(ROOT_RELATIVE_LEAD + names.first() + chain(ANY_SEPARATOR, names.drop(1)) + AFTER) { match ->
+            PathAlternative(ROOT_RELATIVE_LEAD + names.first() + chain(ANY_SEPARATOR, names.drop(1)) + AFTER, BACKSLASH_START) { match ->
                 when (styleOfSeparator(match, 0)) {
                     PathStyle.WIN -> PathStyle.REL
                     PathStyle.ESC1 -> PathStyle.REL1
@@ -182,9 +279,9 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         fun gitBashWslAndCygwinAlternatives(driveRegex: String, segments: List<String>, after: String, before: String): List<PathAlternative> {
             val folders = chain(SLASH_SEPARATOR, segments)
             return listOf(
-                fixed(PathStyle.WSL, before + LEADING_SLASH + "mnt" + SLASH_SEPARATOR + driveRegex + folders + after),
-                fixed(PathStyle.CYG, before + LEADING_SLASH + "cygdrive" + SLASH_SEPARATOR + driveRegex + folders + after),
-                fixed(PathStyle.MSYS, before + LEADING_SLASH + driveRegex + folders + after),
+                fixed(PathStyle.WSL, before + LEADING_SLASH + "mnt" + SLASH_SEPARATOR + driveRegex + folders + after, SLASH_OR_BACKSLASH_START),
+                fixed(PathStyle.CYG, before + LEADING_SLASH + "cygdrive" + SLASH_SEPARATOR + driveRegex + folders + after, SLASH_OR_BACKSLASH_START),
+                fixed(PathStyle.MSYS, before + LEADING_SLASH + driveRegex + folders + after, SLASH_OR_BACKSLASH_START),
             )
         }
 
@@ -196,22 +293,23 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         fun shortHomeAlternatives(short: ShortPattern): List<PathAlternative> {
             val before = if (short.segments.size < 2) DRIVE_BEFORE_SHORT_ANCHOR else ""
             val slashBefore = if (short.segments.size < 2) SLASH_BEFORE_SHORT_ANCHOR else ""
+            val startsWithDrive = if (short.isOnAnyDrive) AlternativeStart.ANY_LETTER_BEFORE_COLON_OR_HYPHEN else AlternativeStart.characters(short.drive)
             val list = mutableListOf<PathAlternative>()
             // C:\Users\ALICE~1, C:/Users/ALICE~1, C:\\Users\\ALICE~1, ...
-            list += PathAlternative(before + short.drive + ":" + chain(ANY_SEPARATOR, short.segments) + AFTER_SHORT) { match ->
+            list += PathAlternative(before + short.drive + ":" + chain(ANY_SEPARATOR, short.segments) + AFTER_SHORT, startsWithDrive) { match ->
                 shortStyleOf(styleOfSeparator(match, 2))
             }
             // Git Bash 8.3 home: /c/Users/ALICE~1, WSL: /mnt/c/Users/ALICE~1, Cygwin: /cygdrive/c/Users/ALICE~1
             list += gitBashWslAndCygwinAlternatives(short.drive, short.segments, AFTER_SHORT, slashBefore)
             // Claude Code project folder of the 8.3 home: C--Users-ALICE-1
-            list += fixed(PathStyle.ENC, ENC_BEFORE + short.encoded + AFTER_ENC)
+            list += fixed(PathStyle.ENC, ENC_BEFORE + short.encoded + AFTER_ENC, startsWithDrive)
             return list
         }
 
         /**
-         * The style the first separator found at [from] stands for: a slash (also `\/` and `\u002f`) is
-         * `fwd`, an escaped backslash `\u005c` counts as two, then one backslash is `win`, two `esc1`,
-         * three or four `esc2`, more `esc3`.
+         * The style the first separator found at [from] stands for: a slash (also the escaped slash, and the
+         * escape u002f) is `fwd`, the escape u005c of a backslash counts as two, then one backslash is `win`,
+         * two `esc1`, three or four `esc2`, more `esc3`.
          */
         fun styleOfSeparator(text: String, from: Int): PathStyle {
             var index = from
@@ -219,7 +317,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
             val backslashes = index - from
             if (index < text.length && text[index] == '/') return PathStyle.FWD
             if (backslashes > 0 && text.regionMatches(index, "u002f", 0, 5, ignoreCase = true)) return PathStyle.FWD
-            // `\u005c` is what a decoded backslash looks like in raw JSON text: it stands for two.
+            // The escape of a backslash is what a decoded backslash looks like in raw JSON text: it stands for two.
             if (backslashes > 0 && text.regionMatches(index, "u005c", 0, 5, ignoreCase = true)) return styleOfBackslashes(2 * backslashes)
             return styleOfBackslashes(backslashes)
         }
@@ -241,6 +339,6 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
 
         /** The encoded form, left out when it has no letter or digit to tell it from a line of dashes. */
         fun encodedAlternative(encodedFolderName: String?): PathAlternative? =
-            encodedFolderName?.let { fixed(PathStyle.ENC, ENC_BEFORE + Pattern.quote(it) + AFTER_ENC) }
+            encodedFolderName?.let { fixed(PathStyle.ENC, ENC_BEFORE + Pattern.quote(it) + AFTER_ENC, startingWith(it.first())) }
     }
 }

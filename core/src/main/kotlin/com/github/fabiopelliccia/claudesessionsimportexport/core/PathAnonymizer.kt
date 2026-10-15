@@ -60,6 +60,9 @@ class PathAnonymizer(
     private val needles: List<String>
     private val residual: Pattern?
 
+    /** What the residual search needs in a text to find anything, so that the regex is not run on every text. */
+    private val residualNeedles: List<String>
+
     init {
         PathTokens.requireValidPrefix(tokenPrefix)
         val candidates = mutableListOf<Pair<PathKind, AnchorPath>>()
@@ -77,12 +80,13 @@ class PathAnonymizer(
         }
         needles = needlesOf(anchors.map { it.second }, identity)
         residual = residualPatternOf(identity.userName)
+        residualNeedles = PathNeedles.of(emptyList(), residualNamesOf(identity.userName), emptyList(), emptyList())
     }
 
     /**
      * Cheap pre-filter: `false` guarantees [text] holds no anchor, so it need not be parsed or matched.
-     * It looks for the leaf name of each anchor (plain, encoded as a project folder, percent-encoded
-     * and JSON-escaped), the user name and the 8.3 stem, whatever the case.
+     * It looks for a text every spelling of the leaf name of each anchor, of the user name and of the 8.3
+     * stem has in common, whatever the case; see [PathNeedles].
      */
     fun mayContainCandidate(text: String): Boolean = needles.any { JsonLines.containsIgnoreCase(text, it) }
 
@@ -130,18 +134,40 @@ class PathAnonymizer(
      * is how Windows tools store text. Counts only: a binary is never rewritten.
      */
     fun scanBytes(bytes: ByteArray): Int {
-        if (bytes.isEmpty()) return 0
-        val views = listOf(
-            String(bytes, Charsets.UTF_8),
-            String(bytes, Charsets.UTF_16LE),
-            if (bytes.size > 1) String(bytes, 1, bytes.size - 1, Charsets.UTF_16LE) else "",
+        if (bytes.isEmpty() || !bytesMayContainCandidate(bytes)) return 0
+        // One view at a time: a binary of many megabytes is not copied three times over.
+        val views: Sequence<() -> String> = sequenceOf(
+            { String(bytes, Charsets.UTF_8) },
+            { String(bytes, Charsets.UTF_16LE) },
+            { if (bytes.size > 1) String(bytes, 1, bytes.size - 1, Charsets.UTF_16LE) else "" },
         )
-        return views.sumOf { view ->
+        return views.sumOf { decode ->
             val stats = Stats()
-            anonymizeText(view, stats)
+            anonymizeText(decode(), stats)
             stats.totalReplacements
         }
     }
+
+    /**
+     * The pre-filter on raw bytes: `false` when none of the needles is in [bytes], as UTF-8 or as UTF-16LE
+     * (each character followed by a byte of its own, which is not checked), so that no view of them is
+     * worth decoding. A needle with a character outside ASCII is not looked for in bytes: the answer is `true`.
+     */
+    private fun bytesMayContainCandidate(bytes: ByteArray): Boolean =
+        needles.any { needle -> needle.any { it.code >= ASCII_LIMIT } || containsAscii(bytes, needle, 1) || containsAscii(bytes, needle, 2) }
+
+    /** The ASCII [needle] in [bytes], whatever the case, its characters [stride] bytes apart. */
+    private fun containsAscii(bytes: ByteArray, needle: String, stride: Int): Boolean {
+        val lastStart = bytes.size - (needle.length - 1) * stride - 1
+        for (start in 0..lastStart) {
+            var matched = 0
+            while (matched < needle.length && asciiLowercase(bytes[start + matched * stride].toInt()) == asciiLowercase(needle[matched].code)) matched++
+            if (matched == needle.length) return true
+        }
+        return false
+    }
+
+    private fun asciiLowercase(code: Int): Int = if (code in 'A'.code..'Z'.code) code + CASE_OFFSET else code
 
     /**
      * Whole-word hits of the user name in [text]; zero when the name is shorter than 4 characters. The tokens
@@ -149,7 +175,9 @@ class PathAnonymizer(
      */
     fun countResidualUserName(text: String): Int {
         if (residual == null) return 0
-        return countMatches(residual, withoutTokens(text))
+        val withoutOurTokens = withoutTokens(text)
+        if (residualNeedles.none { JsonLines.containsIgnoreCase(withoutOurTokens, it) }) return 0
+        return countMatches(residual, withoutOurTokens)
     }
 
     /** [text] with every token of this anonymizer replaced by a space. */
@@ -159,18 +187,15 @@ class PathAnonymizer(
     }
 
     private fun replace(matcher: AnchorMatcher, text: String, stats: Stats): String {
-        val found = matcher.pattern.matcher(text)
-        if (!found.find()) return text
-        val out = StringBuilder(text.length + 32)
+        var out: StringBuilder? = null
         var last = 0
-        do {
-            out.append(text, last, found.start())
-            val style = matcher.styleOf(found)
-            out.append(PathTokens.render(matcher.kind, style, tokenPrefix))
+        matcher.forEachMatch(text) { start, end, style ->
+            val builder = out ?: StringBuilder(text.length + 32).also { out = it }
+            builder.append(text, last, start).append(PathTokens.render(matcher.kind, style, tokenPrefix))
             stats.count(matcher.kind, style)
-            last = found.end()
-        } while (found.find())
-        return out.append(text, last, text.length).toString()
+            last = end
+        }
+        return out?.append(text, last, text.length)?.toString() ?: text
     }
 
     private fun countMatches(pattern: Pattern, text: String): Int {
@@ -182,6 +207,10 @@ class PathAnonymizer(
 
     private companion object {
         const val MIN_RESIDUAL_LENGTH = 4
+        const val ASCII_LIMIT = 128
+
+        /** The distance between `A` and `a`. */
+        const val CASE_OFFSET = 'a'.code - 'A'.code
 
         /**
          * The whole-word search for the bare user name, or `null` for a name too short to be told from

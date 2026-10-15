@@ -552,6 +552,60 @@ class PathAnonymizerTest {
 
     // ------------------------------------------------------------------------------ performance --
 
+    // Finding 15: the regex used to be tried at every position of every line that held the user name.
+    @Test
+    fun `finding 15 - fifty megabytes where every line holds an anchor are processed within the time bound`() {
+        val limitMillis = 20_000L
+        val filler = "x".repeat(900)
+        val line = gson.toJson(mapOf("type" to "user", "cwd" to root, "message" to mapOf("content" to """C:\Users\alice\docs $filler"""))) + "\n"
+        val lines = 50 * 1024 * 1024 / line.length
+        val input = line.repeat(lines)
+
+        val stats = PathAnonymizer.Stats()
+        val started = System.nanoTime()
+        val out = anonymizer.anonymizeJsonl(input, stats)
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+
+        assertEquals(lines, stats.rewrittenLines)
+        assertEquals(lines * 2, stats.totalReplacements)
+        assertFalse(out.contains("alice"))
+        assertTrue("took $elapsedMillis ms for $lines lines", elapsedMillis < limitMillis)
+    }
+
+    @Test
+    fun `finding 15 - long runs of the shapes an anchor is made of stay linear`() {
+        val limitMillis = 10_000L
+        val heavy = listOf(
+            "C:\\Users\\" + "alice".repeat(200_000),
+            "\\".repeat(1_000_000) + "C:",
+            "C:\\\\\\\\Users\\\\\\\\ali".repeat(50_000),
+            "C:/Users/ALICE~" + "1".repeat(1_000_000) + "x",
+            "-".repeat(1_000_000),
+            "C--Users-alic".repeat(80_000),
+            "C:" + "\\".repeat(1_000_000) + "Users",
+            "alice " + "ccccc".repeat(200_000),
+        )
+        val started = System.nanoTime()
+        for (text in heavy) anonymizer.anonymizeText(text)
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+        assertTrue("took $elapsedMillis ms", elapsedMillis < limitMillis)
+    }
+
+    @Test
+    fun `finding 15 - a big binary without the user name is not decoded three times over`() {
+        val limitMillis = 5_000L
+        val binary = ByteArray(50 * 1024 * 1024) { (it * 31).toByte() }
+        val started = System.nanoTime()
+        assertEquals(0, anonymizer.scanBytes(binary))
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+        assertTrue("took $elapsedMillis ms", elapsedMillis < limitMillis)
+        // With the name in it the views are decoded and the anchor is found, as before.
+        val withAnchor = binary.copyOf()
+        val anchor = """C:\Users\alice\x""".toByteArray(Charsets.UTF_8)
+        anchor.copyInto(withAnchor, 1_000_001)
+        assertEquals(1, anonymizer.scanBytes(withAnchor))
+    }
+
     /**
      * PERFORMANCE BOUND - tune [limitMillis] if the build machine is slower: about 50 MB of JSONL
      * where one line in 400 holds an anchor must go through in well under it (measured: a few seconds).

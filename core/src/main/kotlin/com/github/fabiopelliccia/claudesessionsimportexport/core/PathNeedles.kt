@@ -9,7 +9,7 @@ import java.text.Normalizer
  * compared whatever the case (`JsonLines.containsIgnoreCase`), so they are kept as they are.
  *
  * What every spelling of a name has in common is its run of ASCII letters and digits: composed or
- * decomposed, escaped as `ë`, percent-encoded, encoded as a project folder name (where only the
+ * decomposed, escaped as a JSON unicode escape (a backslash, `u` and four hex digits), percent-encoded, encoded as a project folder name (where only the
  * letters and digits of ASCII survive) - those characters are never changed. So the longest such run of
  * the name is the needle. A name without a useful run (`Алиса`, `Zoë`) is found by one of its
  * non-ASCII characters in each of its spellings instead, and its folder name needs a needle of its own.
@@ -65,7 +65,7 @@ internal object PathNeedles {
         return NameNeedles(listOf(longestRun ?: name), byCharacter = false)
     }
 
-    /** One non-ASCII character as it appears in each spelling: itself, decomposed, `ë` (`u00eb`) and `%C3%AB`. */
+    /** One non-ASCII character as it appears in each spelling: itself, decomposed, the JSON escape without its backslash (`u00eb`) and `%C3%AB`. */
     private fun spellingsOf(codePoint: Int): List<String> {
         val text = String(Character.toChars(codePoint))
         val spellings = mutableListOf(text)
