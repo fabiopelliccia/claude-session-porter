@@ -1,0 +1,16 @@
+{
+  "name": "session-porter",
+  "description": "Move Claude Code sessions between computers: export them without any trace of your personal folders, import them on another PC.",
+  "owner": {
+    "name": "Fabio Pelliccia"
+  },
+  "plugins": [
+    {
+      "name": "session-porter",
+      "source": "./plugin",
+      "description": "Export your Claude Code sessions into an anonymized archive and import such an archive on another computer. Needs Java 21 or later.",
+      "category": "productivity",
+      "keywords": ["sessions", "export", "import", "backup", "transfer"]
+    }
+  ]
+}

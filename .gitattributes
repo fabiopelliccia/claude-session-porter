@@ -2,3 +2,6 @@
 *.properties text eol=lf
 LICENSE text eol=lf
 cli/src/main/licenses/* text eol=lf
+# Shell scripts must keep LF line endings or the launcher fails on macOS and Linux.
+plugin/scripts/session-porter text eol=lf
+plugin/tests/*.sh text eol=lf

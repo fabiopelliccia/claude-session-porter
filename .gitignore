@@ -4,3 +4,7 @@ build/
 *.iml
 out/
 .kotlin/
+
+# The plugin jar is only copied here for local testing; it is committed at release by WP8.
+plugin/lib/session-porter.jar
+plugin/lib/session-porter.jar.sha256

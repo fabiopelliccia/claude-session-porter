@@ -1,0 +1,10 @@
+{
+  "name": "session-porter",
+  "version": "1.0.0",
+  "description": "Export your Claude Code sessions into an archive with no trace of your personal folders, and import such an archive on another computer. Needs Java 21 or later.",
+  "author": {
+    "name": "Fabio Pelliccia"
+  },
+  "license": "MIT",
+  "keywords": ["sessions", "export", "import", "backup", "transfer"]
+}

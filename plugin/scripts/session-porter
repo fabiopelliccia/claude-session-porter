@@ -1,0 +1,177 @@
+#!/bin/sh
+# Session Porter launcher for POSIX shells (Linux, macOS, Git Bash on Windows).
+#
+# It finds a Java 21+ runtime and runs ../lib/session-porter.jar with the arguments it was given.
+# It never installs Java. When no usable Java exists it prints the same JSON envelope the CLI uses
+# (when --json is among the arguments, otherwise plain text on stderr) and exits with:
+#   20  no Java found        21  Java found, but older than 21        4  the jar is missing
+#
+# Java is looked up in this order, the first one that is version 21 or later wins:
+#   $SESSION_PORTER_JAVA, $JAVA_HOME/bin/java, "java" on PATH, then the usual install folders.
+#
+# Git Bash starts a process slowly, so the lookup avoids subshells and external tools where it can.
+
+MINIMUM_JAVA=21
+
+# The jar lives next to the scripts folder, so the launcher works wherever the plugin is copied to.
+script_dir=$(cd "$(dirname "$0")" && pwd)
+jar="$script_dir/../lib/session-porter.jar"
+
+# ----------------------------------------------------------------------------------- failures --
+
+# What the caller asked for, only needed to write the error envelope.
+json_requested=no
+command_json=null
+for arg in "$@"; do
+    case "$arg" in
+        --json) json_requested=yes ;;
+        list|inspect|export|import|doctor|version|help)
+            [ "$command_json" = null ] && command_json="\"$arg\"" ;;
+    esac
+done
+
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# fail <exit code> <error code> <message> <install hint>...
+fail() {
+    exit_code=$1
+    error_code=$2
+    message=$3
+    shift 3
+    if [ "$json_requested" = yes ]; then
+        hints_json=""
+        for hint in "$@"; do
+            hints_json="$hints_json${hints_json:+,}\"$(json_escape "$hint")\""
+        done
+        printf '{"schemaVersion":1,"ok":false,"command":%s,"data":{"installHints":[%s]},"warnings":[],"error":{"code":"%s","message":"%s"}}\n' \
+            "$command_json" "$hints_json" "$error_code" "$(json_escape "$message")"
+    else
+        echo "session-porter: $message" >&2
+        for hint in "$@"; do echo "  $hint" >&2; done
+    fi
+    exit "$exit_code"
+}
+
+# The same hints whichever way Java is missing.
+fail_with_install_hints() {
+    fail "$1" "$2" "$3" \
+        "Windows: winget install EclipseAdoptium.Temurin.21.JRE" \
+        "macOS: brew install --cask temurin@21" \
+        "Linux (Debian/Ubuntu): sudo apt install openjdk-21-jre" \
+        "Or set SESSION_PORTER_JAVA to the path of a Java $MINIMUM_JAVA+ executable."
+}
+
+# -------------------------------------------------------------------------------------- Java --
+
+carriage_return=$(printf '\r')
+
+# Sets $posix_path to $1 as Git Bash wants it when $1 is a Windows path (C:\Program Files\...);
+# any other path stays as it is.
+to_posix_path() {
+    posix_path=$1
+    case "$1" in
+        *\\*|?:*) command -v cygpath >/dev/null 2>&1 && posix_path=$(cygpath -u "$1") ;;
+    esac
+}
+
+# Sets $java_major to the major version of the Java at $1 (8, 17, 21...); returns 1 when it does not run.
+read_java_major() {
+    java_major=""
+    output=$("$1" -XshowSettings:properties -version 2>&1) || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            *java.specification.version\ =*) java_major=${line#*= }; break ;;
+        esac
+    done <<EOF
+$output
+EOF
+    java_major=${java_major%"$carriage_return"}
+    case "$java_major" in
+        1.*) java_major=${java_major#1.} ;;   # Java 8 calls itself 1.8
+    esac
+    java_major=${java_major%%.*}
+    case "$java_major" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+}
+
+java=""            # the Java that will run the jar, once one is accepted
+too_old_found=""   # the first Java that works but is older than the minimum, for the error message
+
+# try_java <path>: accepts the Java at <path> when it exists and is version 21 or later.
+try_java() {
+    [ -n "$java" ] && return 0
+    # On Windows the file is java.exe, which "[ -x ]" finds under the name "java" in Git Bash;
+    # the second test covers shells that do not do that.
+    if [ -x "$1" ] || [ -x "$1.exe" ]; then
+        read_java_major "$1" || return 0
+        if [ "$java_major" -ge "$MINIMUM_JAVA" ]; then
+            java=$1
+        elif [ -z "$too_old_found" ]; then
+            too_old_found="$java_major (at $1)"
+        fi
+    fi
+}
+
+# try_each <glob pattern>...: tries every file the patterns expand to (a pattern that matches nothing stays literal and fails the test).
+try_each() {
+    for candidate in "$@"; do
+        try_java "$candidate"
+    done
+}
+
+find_java() {
+    if [ -n "$SESSION_PORTER_JAVA" ]; then to_posix_path "$SESSION_PORTER_JAVA"; try_java "$posix_path"; fi
+    if [ -n "$JAVA_HOME" ]; then to_posix_path "$JAVA_HOME"; try_java "$posix_path/bin/java"; fi
+    [ -n "$java" ] && return
+    on_path=$(command -v java 2>/dev/null) && try_java "$on_path"
+    [ -n "$java" ] && return
+
+    # Windows: the usual install folders of the common distributions and of the JetBrains IDEs.
+    # Git Bash spells the variable PROGRAMFILES, so both spellings are read.
+    previous_base=""
+    for base in "$ProgramW6432" "${ProgramFiles:-$PROGRAMFILES}" "${LOCALAPPDATA:+$LOCALAPPDATA/Programs}"; do
+        [ -n "$base" ] && [ "$base" != "$previous_base" ] || continue
+        previous_base=$base
+        to_posix_path "$base"
+        base=$posix_path
+        try_each "$base"/Eclipse\ Adoptium/*/bin/java "$base"/Microsoft/jdk-*/bin/java "$base"/Zulu/*/bin/java \
+                 "$base"/Java/*/bin/java "$base"/Amazon\ Corretto/*/bin/java "$base"/JetBrains/*/jbr/bin/java \
+                 "$base"/IntelliJ*/jbr/bin/java
+        [ -n "$java" ] && return
+    done
+
+    # Any system: JDKs that IntelliJ downloads, SDKMAN, and the distribution folders of Linux and macOS.
+    try_each "$HOME"/.jdks/*/bin/java "$HOME"/.sdkman/candidates/java/*/bin/java /usr/lib/jvm/*/bin/java \
+             /Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java
+    [ -n "$java" ] && return
+
+    # macOS: ask the system for a Java 21+.
+    if [ -x /usr/libexec/java_home ]; then
+        mac_home=$(/usr/libexec/java_home -v "$MINIMUM_JAVA+" 2>/dev/null) && try_java "$mac_home/bin/java"
+    fi
+}
+
+find_java
+
+if [ -z "$java" ]; then
+    if [ -n "$too_old_found" ]; then
+        fail_with_install_hints 21 JAVA_TOO_OLD "Session Porter needs Java $MINIMUM_JAVA or later, but the Java found is version $too_old_found."
+    fi
+    fail_with_install_hints 20 JAVA_NOT_FOUND "Session Porter needs Java $MINIMUM_JAVA or later, and no Java was found."
+fi
+
+if [ ! -f "$jar" ]; then
+    fail 4 JAR_NOT_FOUND "The program file lib/session-porter.jar is missing from the plugin folder ($script_dir/..)." \
+        "Reinstall the plugin, or build the jar with: ./gradlew :cli:shadowJar"
+fi
+
+# A Windows java.exe wants a Windows path for the jar; cygpath -m gives C:/... (no backslashes to escape).
+if command -v cygpath >/dev/null 2>&1; then
+    jar=$(cygpath -m "$jar")
+fi
+
+# exec keeps standard input, standard output and the exit code of the CLI as they are.
+exec "$java" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "$jar" "$@"
