@@ -6,7 +6,17 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Both systems build and test everything. Windows matters: its checkout writes CRLF line endings and its
+    # java.exe reads the command line in the ANSI code page, which is where the jar's bytes and the CLI's
+    # arguments could differ from Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -16,3 +26,20 @@ jobs:
       - run: chmod +x gradlew
       # Builds and tests the core and the CLI, and builds cli/build/libs/session-porter.jar.
       - run: ./gradlew build
+      # The jar must be the same bytes on every system: its hash goes to the next job, which compares them.
+      - run: sha256sum cli/build/libs/session-porter.jar | cut -d ' ' -f 1 > jar-sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jar-sha256-${{ matrix.os }}
+          path: jar-sha256.txt
+
+  same-jar:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jar-sha256-*
+      - run: |
+          cat jar-sha256-*/jar-sha256.txt
+          test "$(cat jar-sha256-*/jar-sha256.txt | sort -u | wc -l)" = 1
