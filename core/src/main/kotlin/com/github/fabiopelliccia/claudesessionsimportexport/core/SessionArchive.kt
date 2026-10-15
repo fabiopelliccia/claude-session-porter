@@ -535,10 +535,16 @@ object SessionArchive {
                 Files.write(target, final.toByteArray(StandardCharsets.UTF_8))
                 rewritten++
             } else if (deanonymizer != null) {
-                val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                val text = decodeUtf8Text(bytes)
-                val final = text?.let { deanonymizer.deanonymizeText(it, rendered) }
-                Files.write(target, if (final == null || final == text) bytes else final.toByteArray(StandardCharsets.UTF_8))
+                val bytes = zip.getInputStream(entry).use { readAtMost(it, LARGE_FILE_BYTES) }
+                if (bytes == null) {
+                    // Too large to hold in memory: the export copied such a file as it was, with no token to render.
+                    zip.getInputStream(entry).use { input -> Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING) }
+                } else {
+                    // Text is rendered in the encoding it was exported in (UTF-8, or UTF-16 with a BOM); anything else is copied.
+                    val decoded = decodeTextFile(bytes)
+                    val final = decoded?.let { deanonymizer.deanonymizeText(it.text, rendered) }
+                    Files.write(target, if (decoded == null || final == decoded.text) bytes else decoded.encode(final!!))
+                }
             } else {
                 zip.getInputStream(entry).use { input -> Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING) }
             }

@@ -47,6 +47,12 @@ private fun encodingOf(bytes: ByteArray): TextEncoding =
             encoding.byteOrderMark.indices.all { bytes[it] == encoding.byteOrderMark[it] }
     } ?: TextEncoding.UTF_8
 
+/** All of [input] when it is [limit] bytes or fewer, `null` when it is longer (then nothing more than `limit + 1` bytes were read). */
+internal fun readAtMost(input: java.io.InputStream, limit: Long): ByteArray? {
+    val bytes = input.readNBytes((limit + 1).toInt())
+    return if (bytes.size > limit) null else bytes
+}
+
 /**
  * The [text] of a transcript up to its last complete line, and whether a fragment after it was [partialLineDropped].
  * A transcript of a live session may end in the middle of a line, and even in the middle of a character.

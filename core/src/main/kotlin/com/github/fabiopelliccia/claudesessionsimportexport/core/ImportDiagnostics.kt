@@ -193,7 +193,9 @@ class ImportDiagnostics(private val home: Path) {
             runCatching {
                 Files.walk(dir).use { paths ->
                     paths.filter { it.isRegularFile() }.forEach { file ->
-                        val text = runCatching { decodeUtf8Text(Files.readAllBytes(file)) }.getOrNull() ?: return@forEach
+                        // A file too large to be read whole was copied as it was exported, and the prefix was chosen so that no source holds a token.
+                        if (Files.size(file) > LARGE_FILE_BYTES) return@forEach
+                        val text = runCatching { decodeTextFile(Files.readAllBytes(file))?.text }.getOrNull() ?: return@forEach
                         val count = PathTokens.count(text, prefix)
                         if (count > 0) found["$label/${dir.relativize(file).toString().replace('\\', '/')}"] = count
                     }

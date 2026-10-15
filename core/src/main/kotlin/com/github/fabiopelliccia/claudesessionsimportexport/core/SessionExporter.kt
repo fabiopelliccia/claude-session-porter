@@ -26,13 +26,15 @@ import kotlin.io.path.isRegularFile
  * [SessionRedactor] and [PathAnonymizer]):
  *
  * - the main transcript and every `.jsonl` file under its auxiliary folder (subagent runs): the
- *   unfinished last line of a live session is dropped, then the account identity is redacted and every
- *   path anchor of the session replaced, string values and object keys alike, an unchanged line
+ *   unfinished last line of a live session is dropped, then the account identity is redacted (the lines
+ *   that carry it, [SessionRedactor]; the email and git name wherever else they are, [AccountIdentityScrubber])
+ *   and every path anchor of the session replaced, string values and object keys alike, an unchanged line
  *   staying byte for byte what it was;
- * - any other file of the auxiliary folder and of the file history: UTF-8 text (no NUL) goes through
- *   the same anchor replacement as plain text, anything else is copied verbatim and only scanned, a
- *   hit being reported by entry name. A file above [LARGE_FILE_BYTES] is never read whole: it is
- *   scanned in chunks and copied as it is, and reported like a binary one;
+ * - any other file of the auxiliary folder and of the file history: text (UTF-8, NULs included, or UTF-16 with
+ *   a byte order mark) goes through the same two replacements as plain text and is written back in its own
+ *   encoding, anything else is copied verbatim and only scanned, a hit being reported by entry name. A file
+ *   above [LARGE_FILE_BYTES] is never read whole: it is scanned in chunks and copied as it is, and reported
+ *   like a binary one;
  * - the ZIP entry names and the manifest values that hold a path (`projectPath`, `projectFolderName`,
  *   `gitBranch`), with `summary` taken again from the anonymized transcript.
  *
@@ -61,6 +63,10 @@ internal class SessionExporter(
     private var unreadable = 0
     private var partialLinesDropped = 0
     private val redaction = SessionRedactor.Stats()
+
+    /** The account email and git user name found in the sessions, removed from every text; known before the first entry is written. */
+    private var scrubber = AccountIdentityScrubber.NONE
+    private val scrubStats = AccountIdentityScrubber.Stats()
     private val totals = Totals()
     private val usedNames = HashSet<String>()
 
@@ -129,6 +135,7 @@ internal class SessionExporter(
             binaryEntriesWithHits = totals.binaryEntries.toList(),
             partialLinesDropped = partialLinesDropped,
             keyCollisions = totals.keyCollisions,
+            identityValuesScrubbed = scrubStats.replacements,
         )
     }
 
@@ -144,6 +151,7 @@ internal class SessionExporter(
         val projectsDir = ClaudePaths.projectsDir(home)
         // One prefix for the whole archive, known before the first line is anonymized.
         val prefix = PathTokens.choosePrefix { needle -> sourcesContain(projectsDir, needle) }
+        scrubber = AccountIdentityScrubber.collect(transcriptsOfAllSessions(projectsDir))
 
         sessions.forEachIndexed { index, session ->
             progress.report(
@@ -249,7 +257,7 @@ internal class SessionExporter(
         val stats = PathAnonymizer.Stats()
         val projectPath = session.projectPath?.let { anonymizer.anonymizeText(it, stats) }
         val folderName = anonymizer.anonymizeText(session.projectFolderName, stats)
-        val gitBranch = session.gitBranch?.let { anonymizer.anonymizeText(it, stats) }
+        val gitBranch = session.gitBranch?.let { anonymizer.anonymizeText(scrubber.scrubText(it, scrubStats), stats) }
         val summary = main.text?.let { BufferedReader(StringReader(it)).use(SessionTitle::of) }
         // The summary comes from text that is already anonymized: only its bare user name is counted.
         summary?.let { stats.residualUserNameHits += anonymizer.countResidualUserName(it) }
@@ -279,7 +287,8 @@ internal class SessionExporter(
         val stats = PathAnonymizer.Stats()
         // A line still being written has no newline yet: the fragment is not a message, leave it out.
         val lines = completeLinesOf(readBytes(file))
-        val anonymized = anonymizer.anonymizeJsonl(SessionRedactor.redact(lines.text, redaction), stats)
+        val redacted = SessionRedactor.redact(lines.text, redaction)
+        val anonymized = anonymizer.anonymizeJsonl(scrubber.scrubJsonl(redacted, scrubStats), stats)
         return Prepared(
             anonymized.toByteArray(StandardCharsets.UTF_8), stats,
             partialLineDropped = lines.partialLineDropped, text = anonymized, isEmpty = lines.text.isBlank(),
@@ -287,16 +296,17 @@ internal class SessionExporter(
     }
 
     /**
-     * A file that is not a transcript: UTF-8 text is anonymized, anything else is copied and scanned. A file
+     * A file that is not a transcript: text is anonymized in the encoding it was written in (UTF-8 whatever it
+     * holds, NULs included, or UTF-16 with its byte order mark), anything else is copied and scanned. A file
      * above [largeFileBytes] is neither read whole nor anonymized (see [copiedAfterScan]).
      */
     private fun prepareFile(file: Path, anonymizer: PathAnonymizer): Prepared {
         if (Files.size(file) > largeFileBytes) return copiedAfterScan(file, anonymizer)
         val stats = PathAnonymizer.Stats()
         val bytes = readBytes(file)
-        val text = decodeUtf8Text(bytes) ?: return Prepared(bytes, stats, binaryHits = anonymizer.scanBytes(bytes))
-        val anonymized = anonymizer.anonymizeText(text, stats)
-        return Prepared(if (anonymized == text) bytes else anonymized.toByteArray(StandardCharsets.UTF_8), stats)
+        val decoded = decodeTextFile(bytes) ?: return Prepared(bytes, stats, binaryHits = anonymizer.scanBytes(bytes))
+        val anonymized = anonymizer.anonymizeText(scrubber.scrubText(decoded.text, scrubStats), stats)
+        return Prepared(if (anonymized == decoded.text) bytes else decoded.encode(anonymized), stats)
     }
 
     /**
@@ -397,6 +407,13 @@ internal class SessionExporter(
     }
 
     // ------------------------------------------------------------------------------ token prefix --
+
+    /** The main transcript and every `.jsonl` file under the auxiliary folder of each session: where a `session_context` line can be. */
+    private fun transcriptsOfAllSessions(projectsDir: Path): List<Path> = sessions.flatMap { session ->
+        val projectDir = projectsDir.resolve(session.projectFolderName)
+        listOf(projectDir.resolve("${session.id}.jsonl")) +
+            filesUnder(projectDir.resolve(session.id)).filter { it.fileName.toString().endsWith(".jsonl", ignoreCase = true) }
+    }
 
     /**
      * Whether any file of any session, the name of any of them (it becomes an entry name, and the import renders
@@ -514,13 +531,4 @@ internal fun uniqueEntryName(name: String, used: MutableSet<String>): String {
         if (used.add(candidate)) return candidate
         number++
     }
-}
-
-/**
- * [bytes] as UTF-8 text, or `null` when they are not: invalid UTF-8 or a NUL mean a binary file, which
- * the export only scans and the import copies as it is.
- */
-internal fun decodeUtf8Text(bytes: ByteArray): String? {
-    val text = decodeStrictly(bytes, 0, bytes.size) ?: return null
-    return text.takeIf { '\u0000' !in it }
 }

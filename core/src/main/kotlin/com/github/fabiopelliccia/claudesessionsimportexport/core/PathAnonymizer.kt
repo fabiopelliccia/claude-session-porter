@@ -135,8 +135,9 @@ class PathAnonymizer(
         JsonLines.mapLines(text) { anonymizeJsonLine(it, stats) }
 
     /**
-     * Number of anchor hits in a binary file, in UTF-8 and in UTF-16LE (both byte alignments), which
-     * is how Windows tools store text. Counts only: a binary is never rewritten.
+     * Number of hits in a binary file, in UTF-8 and in UTF-16LE (both byte alignments), which is how Windows
+     * tools store text: anchors, and the bare name of the user (a name of 4 characters or more). Counts only: a
+     * binary is never rewritten.
      */
     fun scanBytes(bytes: ByteArray): Int {
         if (bytes.isEmpty() || !bytesMayContainCandidate(bytes)) return 0
@@ -149,7 +150,8 @@ class PathAnonymizer(
         return views.sumOf { decode ->
             val stats = Stats()
             anonymizeText(decode(), stats)
-            stats.totalReplacements
+            // An anchor, or the bare name of the user: either one is something of the user in a file nothing can be removed from.
+            stats.totalReplacements + stats.residualUserNameHits
         }
     }
 

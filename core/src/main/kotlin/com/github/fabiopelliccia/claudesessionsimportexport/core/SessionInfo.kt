@@ -113,12 +113,20 @@ data class ExportOutcome(
      */
     val residualUserNameHits: Int = 0,
     val residualEntries: List<String> = emptyList(),
-    /** Binary entries of the archive (copied as they were) in which an anchor was found, by entry name. */
+    /**
+     * Entries of the archive that are not text (or too large to be read whole) and were copied as they were, in which an
+     * anchor or the bare name of the user was found, by entry name. Nothing can be removed from them.
+     */
     val binaryEntriesWithHits: List<String> = emptyList(),
     /** Transcripts whose last line was still being written and was left out of the archive. */
     val partialLinesDropped: Int = 0,
     /** Object keys that two anonymized names would have merged: the later one got a `~2`-style counter, never its original name. */
     val keyCollisions: Int = 0,
+    /**
+     * Occurrences of the account email and git user name that were replaced outside the `session_context` lines the
+     * redactor handles (a `git log` in a tool result, a trailer in a saved file), see [AccountIdentityScrubber].
+     */
+    val identityValuesScrubbed: Int = 0,
 ) {
     /**
      * Whether something of the exporting user may be left in the archive: a bare user name outside any path
