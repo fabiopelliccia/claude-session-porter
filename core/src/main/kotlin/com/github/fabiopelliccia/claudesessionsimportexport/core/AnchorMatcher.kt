@@ -100,7 +100,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         fun build(path: AnchorPath, shortPatterns: List<ShortPattern>): List<PathAlternative> {
             val names = path.segments.map { PathNamePatterns.plain(it) }
             val urlNames = path.segments.map { PathNamePatterns.url(it) }
-            val encoded = Pattern.quote(ClaudePaths.encodeProjectPath(nativeOf(path)))
+            val encodedFolderName = path.encodedFolderName
             val isShortAnchor = path.segments.size < 2
             val list = mutableListOf<PathAlternative>()
             val drive = path.drive
@@ -114,7 +114,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
                 // C:\Users\alice, C:/Users/alice, C:\\Users\\alice, ... (the style is the first separator's)
                 list += PathAlternative(driveBefore + drive + ":" + chain(ANY_SEPARATOR, names) + AFTER) { match -> styleOfSeparator(match, 2) }
                 // Claude Code project folder: C--Users-alice
-                list += fixed(PathStyle.ENC, ENC_BEFORE + encoded + AFTER_ENC)
+                encodedAlternative(encodedFolderName)?.let { list += it }
                 // Percent-encoded: C%3A%5CUsers%5Calice, and C:/Users/alice or C%3A%2FUsers%2Falice
                 list += fixed(PathStyle.URL_BACKSLASH, urlBefore + drive + URL_COLON + chain(URL_BACKSLASH_SEPARATOR, urlNames) + AFTER_URL)
                 list += fixed(PathStyle.URL, urlBefore + drive + URL_COLON + chain(URL_SEPARATOR, urlNames) + AFTER_URL)
@@ -124,7 +124,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
                 // /home/alice, also as the JSON-escaped \/home\/alice
                 list += fixed(PathStyle.FWD, slashBefore + chain(SLASH_SEPARATOR, names) + AFTER)
                 // Claude Code project folder: -home-alice
-                list += fixed(PathStyle.ENC, ENC_BEFORE + encoded + AFTER_ENC)
+                encodedAlternative(encodedFolderName)?.let { list += it }
                 // Percent-encoded: %2Fhome%2Falice
                 list += fixed(PathStyle.URL, urlBefore + chain(URL_SEPARATOR, urlNames) + AFTER_URL)
             }
@@ -195,7 +195,8 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
             else -> style
         }
 
-        fun nativeOf(path: AnchorPath): String =
-            if (path.drive != null) "${path.drive}:\\" + path.segments.joinToString("\\") else "/" + path.segments.joinToString("/")
+        /** The encoded form, left out when it has no letter or digit to tell it from a line of dashes. */
+        fun encodedAlternative(encodedFolderName: String?): PathAlternative? =
+            encodedFolderName?.let { fixed(PathStyle.ENC, ENC_BEFORE + Pattern.quote(it) + AFTER_ENC) }
     }
 }

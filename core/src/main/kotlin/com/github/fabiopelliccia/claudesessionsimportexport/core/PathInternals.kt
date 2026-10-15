@@ -22,6 +22,17 @@ internal class AnchorPath private constructor(val drive: Char?, val segments: Li
 
     val leaf: String get() = segments.last()
 
+    /** The path as its own OS writes it: `C:\Users\alice`, `/home/alice`. */
+    val native: String
+        get() = if (drive != null) "$drive:\\" + segments.joinToString("\\") else "/" + segments.joinToString("/")
+
+    /**
+     * The path as a Claude Code project folder name, or `null` when that name would hold no letter or digit
+     * at all (a home `/Алиса` encodes to `------`, which says nothing and would match every line of dashes).
+     */
+    val encodedFolderName: String?
+        get() = ClaudePaths.encodeProjectPath(native).takeIf { name -> name.any { it != '-' } }
+
     fun startsWith(other: AnchorPath): Boolean =
         drive?.lowercaseChar() == other.drive?.lowercaseChar() &&
             segments.size >= other.segments.size &&

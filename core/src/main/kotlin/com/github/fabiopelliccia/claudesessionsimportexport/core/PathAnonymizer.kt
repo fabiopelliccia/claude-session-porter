@@ -75,7 +75,7 @@ class PathAnonymizer(
         matchers = anchors.map { (kind, path) ->
             AnchorMatcher(kind, path, if (kind == PathKind.HOME) shorts else emptyList())
         }
-        needles = needlesOf(anchors.map { it.second }, identity, shorts)
+        needles = needlesOf(anchors.map { it.second }, identity)
         residual = residualPatternOf(identity.userName)
     }
 
@@ -221,38 +221,12 @@ class PathAnonymizer(
             return ShortPattern("[A-Za-z]", foldersAboveHome.map { Pattern.quote(it) } + shortName, encoded)
         }
 
-        fun needlesOf(anchors: List<AnchorPath>, identity: SourceIdentity, shorts: List<ShortPattern>): List<String> {
-            val names = linkedSetOf<String>()
-            fun add(name: String) {
-                if (name.isNotEmpty()) names += name.lowercase()
-            }
-            // An anchor below another one is spelled with the other's folder names too (every form of
-            // a project root under the home names the home), so its own leaf, often a one-letter
-            // `src` or `X`, would only let every line through the filter.
-            val outermost = anchors.filter { anchor -> anchors.none { other -> other !== anchor && anchor.startsWith(other) } }
-            for (leaf in outermost.map { it.leaf } + identity.userName + residualNamesOf(identity.userName)) {
-                add(leaf)
-                add(ClaudePaths.encodeProjectPath(leaf))
-                add(percentEncode(leaf))
-                add(jsonEscape(leaf))
-            }
-            identity.shortStems.forEach(::add)
-            // `ZO5F2~1` is `ZO5F2-1` as a project folder name: only what comes before the tilde is in every spelling.
-            identity.shortHomes.mapNotNull { AnchorPath.parse(it)?.leaf?.substringBefore('~') }.forEach(::add)
-            return names.toList()
-        }
-
-        fun percentEncode(text: String): String {
-            val out = StringBuilder()
-            for (byte in text.toByteArray(Charsets.UTF_8)) {
-                val c = (byte.toInt() and 0xFF).toChar()
-                if (c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c in "-._~") out.append(c) else out.append('%').append("%02X".format(byte.toInt() and 0xFF))
-            }
-            return out.toString()
-        }
-
-        /** Non-ASCII characters as a JSON writer without `ensure ASCII off` spells them: `\u00eb`. */
-        fun jsonEscape(text: String): String =
-            text.map { if (it.code < 128) it.toString() else "\\u%04x".format(it.code) }.joinToString("")
+        fun needlesOf(anchors: List<AnchorPath>, identity: SourceIdentity): List<String> =
+            PathNeedles.of(
+                anchors = anchors,
+                userNames = listOf(identity.userName) + residualNamesOf(identity.userName),
+                shortStems = identity.shortStems,
+                shortHomeLeaves = identity.shortHomes.mapNotNull { AnchorPath.parse(it)?.leaf },
+            )
     }
 }

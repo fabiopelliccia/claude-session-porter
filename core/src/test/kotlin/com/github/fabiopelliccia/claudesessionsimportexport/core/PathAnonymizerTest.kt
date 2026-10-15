@@ -397,6 +397,96 @@ class PathAnonymizerTest {
         assertEquals("""ls\n{{SP:ROOT:enc}}\n""", anonymizer.anonymizeText("""ls\nC--Users-alice-IdeaProjects-X\n"""))
     }
 
+    private val zoeHome = "C:\\Users\\Zo\u00eb M\u00fcller"
+    private val zoe = PathAnonymizer(SourceIdentity(home = zoeHome))
+
+    // Finding 3: a non-ASCII name written as JSON \uXXXX inside a decoded string.
+    @Test
+    fun `finding 3 - a non-ASCII name written as unicode escapes inside a string is found`() {
+        val json = """{"content":"{\"cwd\": \"C:\\\\Users\\\\Zo\\u00eb M\\u00fcller\\\\x\"}"}"""
+        val out = JsonParser.parseString(zoe.anonymizeJsonLine(json)).asJsonObject.get("content").asString
+        assertEquals("""{"cwd": "{{SP:HOME:esc1}}\\x"}""", out)
+
+        // As text of its own, in either case of the hex digits and at any escaping level.
+        assertEquals("""{{SP:HOME:esc1}}\\x""", zoe.anonymizeText("""C:\\Users\\Zo\u00eb M\u00fcller\\x"""))
+        assertEquals("""{{SP:HOME:esc1}}\\x""", zoe.anonymizeText("""C:\\Users\\Zo\u00EB M\u00FCller\\x"""))
+        assertEquals("""{{SP:HOME:esc2}}\\\\x""", zoe.anonymizeText("""C:\\\\Users\\\\Zo\\u00eb M\\u00fcller\\\\x"""))
+        // A character outside the basic plane is two surrogate escapes.
+        val emoji = PathAnonymizer(SourceIdentity(home = "C:\\Users\\a\uD83D\uDE00bcd"))
+        assertEquals("{{SP:HOME:win}}", emoji.anonymizeText("""C:\Users\a\ud83d\ude00bcd"""))
+    }
+
+    // Finding 4: partially percent-encoded URIs, the way File.toURI() and Gradle write them.
+    @Test
+    fun `finding 4 - a partially percent-encoded name is found in a file URI`() {
+        assertEquals("file:/{{SP:HOME:url}}/x", zoe.anonymizeText("file:/C:/Users/Zo\u00eb%20M\u00fcller/x"))
+        // Half of the name encoded, half left as it is.
+        assertEquals("file:/{{SP:HOME:url}}/x", zoe.anonymizeText("file:/C:/Users/Zo%C3%AB%20M\u00fcller/x"))
+        val johnSmith = PathAnonymizer(SourceIdentity(home = """C:\Users\John Smith"""))
+        assertEquals("file:/{{SP:HOME:url}}/x", johnSmith.anonymizeText("file:/C:/Users/John+Smith/x"))
+        assertEquals("file:/{{SP:HOME:url}}/x", johnSmith.anonymizeText("file:/C:/Users/John%20Smith/x"))
+        val punctuation = PathAnonymizer(SourceIdentity(home = """C:\Users\alice""", roots = listOf("""C:\Work\a+b (x)\[proj]""")))
+        assertEquals("file:/{{SP:ROOT:url}}/src", punctuation.anonymizeText("file:/C:/Work/a+b%20(x)/%5Bproj%5D/src"))
+        assertEquals("file:///{{SP:ROOT:url}}/src", punctuation.anonymizeText("file:///C:/Work/a%2Bb%20%28x%29/%5Bproj%5D/src"))
+    }
+
+    @Test
+    fun `finding 4 - the cheap filter lets a partially encoded or escaped name through`() {
+        assertTrue(zoe.mayContainCandidate("file:/C:/Users/Zo\u00eb%20M\u00fcller/x"))
+        assertTrue(zoe.mayContainCandidate("C:\\\\Users\\\\Zo\\u00eb M\\u00fcller"))
+        assertTrue(PathAnonymizer(SourceIdentity(home = """C:\Users\John Smith""")).mayContainCandidate("file:/C:/Users/John+Smith/x"))
+        assertFalse(zoe.mayContainCandidate("nothing of the user in here"))
+    }
+
+    // Finding 5: macOS file names are decomposed (NFD), the home is usually composed.
+    @Test
+    fun `finding 5 - a decomposed name is found, whichever form the identity was given in`() {
+        val mac = PathAnonymizer(SourceIdentity(home = "/Users/zo\u00eb"))
+        assertEquals("{{SP:HOME:fwd}}/x", mac.anonymizeText("/Users/zoe\u0308/x"))
+        assertEquals("""{{SP:HOME:win}}""", zoe.anonymizeText("C:\\Users\\Zoe\u0308 Mu\u0308ller"))
+        assertEquals("{{SP:HOME:url}}", zoe.anonymizeText("C:/Users/Zoe%CC%88%20Mu%CC%88ller"))
+        val decomposedIdentity = PathAnonymizer(SourceIdentity(home = "/Users/zoe\u0308"))
+        assertEquals("{{SP:HOME:fwd}}/x", decomposedIdentity.anonymizeText("/Users/zo\u00eb/x"))
+        assertEquals("{{SP:HOME:fwd}}/x", decomposedIdentity.anonymizeText("/Users/zoe\u0308/x"))
+        assertTrue(mac.mayContainCandidate("/Users/zoe\u0308/x"))
+    }
+
+    // Finding 6: the filter lowercased its needles, and "\u0130".lowercase() is "i" plus a combining dot.
+    @Test
+    fun `finding 6 - a root whose name changes shape when lowercased is found`() {
+        val istanbul = PathAnonymizer(SourceIdentity(home = home, roots = listOf("D:\\Projekte\\\u0130stanbul")))
+        assertEquals("""{{SP:ROOT:win}}\a.kt""", istanbul.anonymizeText("D:\\Projekte\\\u0130stanbul\\a.kt"))
+        assertEquals("""{"cwd":"{{SP:ROOT:win}}"}""", istanbul.anonymizeJsonLine("""{"cwd":"D:\\Projekte\\\u0130stanbul"}"""))
+    }
+
+    // Finding 7: spaces escaped for a shell, with a backslash (POSIX shells) or a backtick (PowerShell).
+    @Test
+    fun `finding 7 - a space escaped for the shell is part of the name`() {
+        val johnSmith = PathAnonymizer(SourceIdentity(home = """C:\Users\John Smith"""))
+        assertEquals("cd {{SP:HOME:msys}}/proj", johnSmith.anonymizeText("""cd /c/Users/John\ Smith/proj"""))
+        assertEquals("""cd {{SP:HOME:win}}\proj""", johnSmith.anonymizeText("cd C:\\Users\\John` Smith\\proj"))
+        // The backslash of the escape is doubled with the level of the text it sits in.
+        assertEquals("""cd {{SP:HOME:msys}}/proj""", johnSmith.anonymizeText("""cd /c/Users/John\\ Smith/proj"""))
+    }
+
+    // Finding 15, the part about the filter: a name with no ASCII letter has no run to look for.
+    @Test
+    fun `a name without ASCII letters is found in every spelling and does not let a line of dashes through`() {
+        val cyrillic = PathAnonymizer(SourceIdentity(home = "C:\\Users\\\u0410\u043b\u0438\u0441\u0430"))
+        val encoded = ClaudePaths.encodeProjectPath("C:\\Users\\\u0410\u043b\u0438\u0441\u0430")
+        assertEquals("{{SP:HOME:win}}", cyrillic.anonymizeText("C:\\Users\\\u0410\u043b\u0438\u0441\u0430"))
+        assertEquals("{{SP:HOME:esc1}}", cyrillic.anonymizeText("""C:\\Users\\\u0410\u043b\u0438\u0441\u0430"""))
+        assertEquals("{{SP:HOME:url}}", cyrillic.anonymizeText("C:/Users/%D0%90%D0%BB%D0%B8%D1%81%D0%B0"))
+        assertEquals("{{SP:HOME:enc}}", cyrillic.anonymizeText(encoded))
+        assertFalse(cyrillic.mayContainCandidate("| --- | ----- | ---"))
+
+        // A POSIX home whose encoded form is nothing but dashes is not looked for in that form at all.
+        val posix = PathAnonymizer(SourceIdentity(home = "/\u0410\u043b\u0438\u0441\u0430"))
+        assertFalse(posix.mayContainCandidate("-----"))
+        assertEquals("-----", posix.anonymizeText("-----"))
+        assertEquals("{{SP:HOME:fwd}}/x", posix.anonymizeText("/\u0410\u043b\u0438\u0441\u0430/x"))
+    }
+
     // ------------------------------------------------------------------------------ performance --
 
     /**
