@@ -39,6 +39,10 @@ enum class PathOs {
  * [SHORT], [SHORT_FWD], [SHORT_ESC1] and [SHORT_ESC2] are the 8.3 form of the home (`C:\Users\ALICE~1`)
  * at the corresponding level; [URL] and [URL_BACKSLASH] are the percent-encoded forms (separators
  * `/` or `%2F`, respectively `%5C`).
+ *
+ * [REL], [REL1] and [REL2] are the home without its drive letter, at one, two and four backslashes per
+ * separator: `HOMEPATH=\Users\alice`, or what follows the admin share in `\\localhost\c$\Users\alice`. It is
+ * rendered as the destination's path without its drive, so whatever stood in front of it stays valid.
  */
 enum class PathStyle(
     val token: String,
@@ -60,6 +64,9 @@ enum class PathStyle(
     ENC("enc"),
     URL("url"),
     URL_BACKSLASH("urlbs"),
+    REL("rel", 1),
+    REL1("rel1", 2),
+    REL2("rel2", 4),
     ;
 
     companion object {

@@ -12,19 +12,23 @@ import com.google.gson.stream.JsonToken
 import java.io.StringReader
 
 /**
- * An absolute path taken apart: an optional drive letter and the folder names below it. Only what the
- * anonymization needs; a relative path or a UNC share (`\\server\share`) is not an anchor and does
- * not parse.
+ * An absolute path taken apart: a drive letter, or a UNC share (`\\server\share`, then [isUnc] is set and
+ * the server and the share are the first two [segments]), or neither for a POSIX path; and the folder
+ * names below it. Only what the anonymization needs; a relative path is not an anchor and does not parse.
  */
-internal class AnchorPath private constructor(val drive: Char?, val segments: List<String>) {
+internal class AnchorPath private constructor(val drive: Char?, val segments: List<String>, val isUnc: Boolean = false) {
 
-    val isWindows: Boolean get() = drive != null
+    val isWindows: Boolean get() = drive != null || isUnc
 
     val leaf: String get() = segments.last()
 
-    /** The path as its own OS writes it: `C:\Users\alice`, `/home/alice`. */
+    /** The path as its own OS writes it: `C:\Users\alice`, `\\server\share\alice`, `/home/alice`. */
     val native: String
-        get() = if (drive != null) "$drive:\\" + segments.joinToString("\\") else "/" + segments.joinToString("/")
+        get() = when {
+            drive != null -> "$drive:\\" + segments.joinToString("\\")
+            isUnc -> "\\\\" + segments.joinToString("\\")
+            else -> "/" + segments.joinToString("/")
+        }
 
     /**
      * The path as a Claude Code project folder name, or `null` when that name would hold no letter or digit
@@ -35,17 +39,20 @@ internal class AnchorPath private constructor(val drive: Char?, val segments: Li
 
     fun startsWith(other: AnchorPath): Boolean =
         drive?.lowercaseChar() == other.drive?.lowercaseChar() &&
+            isUnc == other.isUnc &&
             segments.size >= other.segments.size &&
             other.segments.indices.all { segments[it].equals(other.segments[it], ignoreCase = true) }
 
     /** Same path in the key the duplicates of an anchor list are detected with. */
-    val key: String get() = (drive?.lowercaseChar()?.toString() ?: "") + "|" + segments.joinToString("/") { it.lowercase() }
+    val key: String
+        get() = (drive?.lowercaseChar()?.toString() ?: if (isUnc) "unc" else "") + "|" + segments.joinToString("/") { it.lowercase() }
 
     companion object {
         private val SEPARATORS = Regex("[\\\\/]+")
 
         fun parse(path: String): AnchorPath? {
             val text = path.trim()
+            if (text.startsWith("\\\\") && text.length > 2 && text[2] != '\\' && text[2] != '/') return parseUnc(text)
             val drive = text.firstOrNull()?.takeIf { text.length >= 2 && text[1] == ':' && (it in 'A'..'Z' || it in 'a'..'z') }
             val rest = if (drive != null) text.substring(2) else text
             if (drive != null && rest.isNotEmpty() && rest[0] != '\\' && rest[0] != '/') return null
@@ -53,6 +60,13 @@ internal class AnchorPath private constructor(val drive: Char?, val segments: Li
             val segments = rest.split(SEPARATORS).filter { it.isNotEmpty() }
             if (segments.isEmpty()) return null
             return AnchorPath(drive, segments)
+        }
+
+        /** `\\server\share\folder`: the server and the share count as folders; a bare server is no anchor. */
+        private fun parseUnc(text: String): AnchorPath? {
+            val segments = text.split(SEPARATORS).filter { it.isNotEmpty() }
+            if (segments.size < 2) return null
+            return AnchorPath(null, segments, isUnc = true)
         }
     }
 }

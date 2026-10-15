@@ -129,6 +129,26 @@ class PathDeanonymizerTest {
         for ((source, expected) in cases) assertEquals(source, expected, roundTrip(source))
     }
 
+    // Finding 8: the home without its drive, and a UNC home, come back as the destination's.
+    @Test
+    fun `a home without its drive letter comes back without it, at its own escaping level`() {
+        assertEquals("HOMEPATH=" + """\Users\bob""", roundTrip("""HOMEPATH=\Users\alice"""))
+        assertEquals("""\\localhost\c$""" + """\Users\bob\x""", roundTrip("""\\localhost\c$\Users\alice\x"""))
+        assertEquals("""\\Users\\bob\\x""", roundTrip("""\\Users\\alice\\x"""))
+        assertEquals("""\\\\Users\\\\bob""", roundTrip("""\\\\Users\\\\alice"""))
+        val mac = PathDeanonymizer(root = "/Users/bob/proj", home = "/Users/bob", claudeHome = "/Users/bob/.claude")
+        assertEquals("HOMEPATH=/Users/bob", roundTrip("""HOMEPATH=\Users\alice""", to = mac))
+        assertEquals("/Users/bob/x/y", roundTrip("""\Users\alice\x\y""", to = mac))
+    }
+
+    @Test
+    fun `a UNC home of the source comes back as the destination's home`() {
+        val source = PathAnonymizer(SourceIdentity(home = """\\fileserver\users\alice"""))
+        assertEquals("""C:\Users\bob\docs""", roundTrip("""\\fileserver\users\alice\docs""", source))
+        assertEquals("""C:\\Users\\bob\\docs""", roundTrip("""\\\\fileserver\\users\\alice\\docs""", source))
+        assertEquals("C--Users-bob-docs", roundTrip("--fileserver-users-alice-docs", source))
+    }
+
     @Test
     fun `the project root comes back as the target folder`() {
         assertEquals("""C:\Users\bob\work\Y\src\a.kt""", roundTrip("""C:\Users\alice\IdeaProjects\X\src\a.kt"""))

@@ -111,13 +111,13 @@ class SourceIdentity(
          */
         fun shortFormsOf(home: String, tempFolders: List<String>, realPathOf: (String) -> String?): List<String> {
             val homePath = AnchorPath.parse(ClaudePaths.normalizeProjectPath(home)) ?: return emptyList()
-            if (!homePath.isWindows) return emptyList()
+            if (homePath.drive == null) return emptyList()
             val found = LinkedHashMap<String, String>()
             for (raw in tempFolders) {
                 if (raw.isBlank()) continue
                 val rawPath = AnchorPath.parse(ClaudePaths.normalizeProjectPath(raw)) ?: continue
                 if (rawPath.startsWith(homePath)) continue
-                if (!rawPath.isWindows || rawPath.segments.size < homePath.segments.size) continue
+                if (rawPath.drive == null || rawPath.segments.size < homePath.segments.size) continue
                 val real = realPathOf(raw)?.let { AnchorPath.parse(ClaudePaths.normalizeProjectPath(it)) } ?: continue
                 if (!real.startsWith(homePath)) continue
                 val short = "${rawPath.drive}:\\" + rawPath.segments.take(homePath.segments.size).joinToString("\\")

@@ -88,7 +88,16 @@ class PathDeanonymizer(
             PathStyle.ENC -> ClaudePaths.encodeProjectPath(native)
             PathStyle.URL -> url(path, "/", ":", native)
             PathStyle.URL_BACKSLASH -> url(path, "%5C", "%3A", native)
+            PathStyle.REL -> withoutDrive(path, native, backslashesPerSeparator = 1)
+            PathStyle.REL1 -> withoutDrive(path, native, backslashesPerSeparator = 2)
+            PathStyle.REL2 -> withoutDrive(path, native, backslashesPerSeparator = 4)
         }
+    }
+
+    /** `\Users\bob` for a destination `C:\Users\bob`, the path itself when it has no drive letter. */
+    private fun withoutDrive(path: AnchorPath?, native: String, backslashesPerSeparator: Int): String {
+        if (path?.drive == null) return native
+        return native.substring(DRIVE_PREFIX_LENGTH).replace("\\", "\\".repeat(backslashesPerSeparator))
     }
 
     /** Renders every token of [text] (taken as it is) for the destination. */
@@ -187,6 +196,9 @@ class PathDeanonymizer(
     private companion object {
         /** Characters that end a path run: a backslash left over is a separator of another level. */
         const val STOP_CHARS = "\\/\"'`<>|*?:;,{}"
+
+        /** The length of `C:`. */
+        const val DRIVE_PREFIX_LENGTH = 2
 
         fun percentEncode(text: String): String {
             val out = StringBuilder()

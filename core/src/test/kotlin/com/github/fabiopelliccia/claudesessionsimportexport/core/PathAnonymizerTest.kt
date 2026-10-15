@@ -469,6 +469,31 @@ class PathAnonymizerTest {
         assertEquals("""cd {{SP:HOME:msys}}/proj""", johnSmith.anonymizeText("""cd /c/Users/John\\ Smith/proj"""))
     }
 
+    // Finding 8: a home without its drive (HOMEPATH, the admin share of the C drive) and a UNC home.
+    @Test
+    fun `finding 8 - a home without a drive letter is found, so are the admin share forms`() {
+        assertEquals("HOMEPATH={{SP:HOME:rel}}", anonymizer.anonymizeText("""HOMEPATH=\Users\alice"""))
+        assertEquals("""\\localhost\c$""" + "{{SP:HOME:rel}}\\x", anonymizer.anonymizeText("""\\localhost\c$\Users\alice\x"""))
+        assertEquals("""\\?\UNC\localhost\c$""" + "{{SP:HOME:rel}}\\x", anonymizer.anonymizeText("""\\?\UNC\localhost\c$\Users\alice\x"""))
+        // One escaping level deeper, as the text of a JSON string inside a string.
+        assertEquals("""{{SP:HOME:rel1}}\\x""", anonymizer.anonymizeText("""\\Users\\alice\\x"""))
+        assertEquals("""{{SP:HOME:rel2}}\\\\x""", anonymizer.anonymizeText("""\\\\Users\\\\alice\\\\x"""))
+        // The folders have to be the home's: another user below the same folder is not it.
+        assertEquals("""\Users\bob""", anonymizer.anonymizeText("""\Users\bob"""))
+    }
+
+    @Test
+    fun `finding 8 - a UNC home is an anchor in its plain, forward-slash and escaped spellings`() {
+        val unc = PathAnonymizer(SourceIdentity(home = """\\fileserver\users\alice""", roots = listOf("""\\fileserver\users\alice\proj""")))
+        assertEquals("""{{SP:ROOT:win}}\src""", unc.anonymizeText("""\\fileserver\users\alice\proj\src"""))
+        assertEquals("""{{SP:HOME:win}}\docs""", unc.anonymizeText("""\\fileserver\users\alice\docs"""))
+        assertEquals("{{SP:HOME:fwd}}/docs", unc.anonymizeText("//fileserver/users/alice/docs"))
+        assertEquals("""{{SP:HOME:esc1}}\\docs""", unc.anonymizeText("""\\\\fileserver\\users\\alice\\docs"""))
+        assertEquals("{{SP:HOME:enc}}-docs", unc.anonymizeText("--fileserver-users-alice-docs"))
+        assertEquals("""\\?\UNC\fileserver\users\bob""", unc.anonymizeText("""\\?\UNC\fileserver\users\bob"""))
+        assertEquals("""{{SP:HOME:win}}\x""", unc.anonymizeText("""\\?\UNC\fileserver\users\alice\x"""))
+    }
+
     // Finding 15, the part about the filter: a name with no ASCII letter has no run to look for.
     @Test
     fun `a name without ASCII letters is found in every spelling and does not let a line of dashes through`() {
