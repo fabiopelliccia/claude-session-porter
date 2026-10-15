@@ -13,7 +13,7 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 | 3 | Motore di anonimizzazione | fatto | `e84caec`; correzioni dei 19 rilievi di [`REVIEW-WP3.md`](REVIEW-WP3.md) in `6a1b8e3`..`58400a7` (8 commit). 182 test verdi, nessuno saltato. Vedi note WP3 sotto. |
 | 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
 | 5 | Import del formato 2 | fatto | `a6605af`; correzioni dei 13 rilievi e delle lacune nei test di [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) in `16e9cd5`..`cc89608` (9 commit). 247 test verdi, nessuno saltato. Vedi note WP4/WP5 sotto. |
-| 6 | CLI | da fare | |
+| 6 | CLI | fatto, review in corso | `98f8e6a`..`19b590f` (4 commit). `./gradlew build` dalla radice ora costruisce e testa core (247) e CLI (81), tutti verdi; CI su `./gradlew build` (non provata su Linux). Jar riproducibile: `session-porter.jar`, 2.595.811 byte, SHA-256 `0f94c25d…0c52b53b` uguale in due build pulite. Vedi note WP6 sotto. |
 | 7 | Plugin Claude Code e marketplace | da fare | |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
 | 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | annullato | Decisione del 2026-10-15: il plugin IntelliJ non avrà nuove versioni oltre la 1.0.1. |
@@ -34,17 +34,18 @@ proprietario.
 
 1. Leggere questo file e `PLAN.md`.
 2. Build su Windows (fuori dal sandbox):
-   `$env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$PWD\build\uds"; .\gradlew.bat -p core build`
-   (il `build` della radice esegue solo `buildEnvironment`: nessun task delega alla build inclusa; la CI usa `-p core build`).
+   `$env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$PWD\build\uds"; .\gradlew.bat build`
+   (dal WP6 il `build` della radice costruisce e testa core e CLI).
 3. Riprendere dal primo WP non "fatto".
 
 ### Ripresa (aggiornato il 2026-10-15, pomeriggio)
 
-Core completo (WP1, WP3, WP4, WP5 con le correzioni delle due review); WP2 abbandonato, WP9 annullato.
-Ordine (sviluppo con Sonnet, review con Opus):
+Core (WP1, WP3-WP5) e CLI (WP6) fatti; WP2 abbandonato, WP9 annullato. Ordine (sviluppo con Sonnet, review con Opus):
 
-1. **WP6** (CLI, PLAN §2), usando le API elencate in "Correzioni della review WP4/WP5" qui sotto.
-2. **WP7** (plugin Claude Code / Desktop, PLAN §3), poi **WP8** (rilascio e documentazione).
+1. **Review del WP6** (sola lettura) e, in parallelo, **WP7** (plugin Claude Code / Desktop, PLAN §3) sulla CLI così com'è;
+   poi le correzioni della review.
+2. Prova interattiva del plugin da parte del proprietario (`claude --plugin-dir`, poi la scheda Code di Claude Desktop).
+3. **WP8** (rilascio e documentazione).
 
 ## Bug trovati nel codice esistente
 
@@ -191,3 +192,26 @@ Limiti noti:
   all'import); la home proprietaria della Claude home si riconosce solo se la cartella si chiama `.claude` e il genitore ha
   almeno due livelli; `/Users/alice` senza unità non viene letto come home Windows; il rollback dello spostamento è best effort;
   la riscrittura dell'id con DUPLICATE tocca solo i percorsi `projects/<cartella>/<id>/` e `file-history/<id>/`.
+
+## Note WP6
+
+- Modulo `cli/` (package `com.github.fabiopelliccia.sessionporter.cli`), shadow 9.6.1, `session-porter.jar` in `cli/build/libs/`;
+  task `dist*`/`shadowDist*` disattivati (i launcher stanno nel plugin). `.gitattributes` forza LF su `*.properties`, `LICENSE` e
+  licenze, altrimenti i byte del jar dipenderebbero dal checkout. Bundle CLI in 10 lingue; la sintassi dell'help è solo in inglese.
+- Comandi: `list [--project] [--since ISO|7d|12h|2w] [--limit]`, `inspect <zip>`, `export (--ids | --ids-file f|- | --all |
+  --project) --out <file.zip|cartella> [--force] [--strict-privacy] [--log-dir]`, `import <zip> --target T [--ids] [--policy
+  skip|replace|duplicate] [--no-shift] [--keep-original-folder] [--log-dir]`, `doctor`, `version`, `help`.
+- Codici di uscita: 0 ok; 2 uso (`error.code` tra cui `unknownSessions`, `noSessions`, `targetRequired`, `outputExists` è 4);
+  3 archivio non valido o non sicuro (`invalidArchive`, `unsafeArchive`); 4 I/O o ambiente; 5 parziale o controlli KO
+  (`partialExport`, `partialImport`); 6 `--strict-privacy` (`privacyFindings`); 10 interno. 20/21 li produce il launcher (WP7).
+- Scostamenti da PLAN §2: con uscita 5 o 6 `data` resta valorizzato insieme a `ok:false` ed `error` (per 6 `archive` è null);
+  l'export scrive un file temporaneo e lo sposta solo se accettato; `--out` deve essere `.zip`, una cartella esistente o finire con
+  `/` o `\`; `--log-dir` anche per `export`; per il formato 1 senza `--target` ogni sessione tiene la sua cartella
+  (`--keep-original-folder` lo dichiara, rifiutato col formato 2 e insieme a `--target`); id sconosciuti o zero sessioni → 2;
+  cartella di destinazione inesistente → avviso e uscita 5 (controllo 8 KO); percorsi relativi risolti dalla cartella corrente;
+  campi JSON in più: `list.data.totalMatching`, `inspect.data.alreadyPresentIds` e `presentLocally` per sessione,
+  `export.data.requestedCount/sizeBytes/privacyFindings/logFile`, `import.data.policy`, dati di `doctor`.
+- Per il WP7: sempre `--json`; prima il codice di uscita, poi `error.code`; stdout in JSON è una sola riga, stderr vuoto senza
+  `--verbose`; `--ids-file -` legge stdin UTF-8 (separatori virgola, spazio, a capo; `#` commento); per il conflitto usare
+  `inspect.data.alreadyPresentIds`; in Git Bash `--target "$PWD"` va bene (la CLI converte `/c/...`); per riprendere usare
+  `imported[].resumeCommand` dalla cartella `data.target`; la CLI scrive UTF-8 a prescindere dai flag della JVM.
