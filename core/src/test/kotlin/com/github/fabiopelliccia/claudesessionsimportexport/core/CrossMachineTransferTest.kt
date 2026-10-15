@@ -769,6 +769,143 @@ class CrossMachineTransferTest {
         assertEquals("users/alice/fix", listed.gitBranch)
     }
 
+    // ------------------------------------------------------- leak forms found by the engine review --
+
+    /**
+     * Plants [forms] in the places a path can hide, on top of what [writePc1Session] wrote: a message of the
+     * transcript (decoded text), the keys of a `trackedFileBackups`, a text file of the auxiliary folder and a
+     * file history backup (both raw text).
+     */
+    private fun plantLeakForms(pc: Pc, root: String, id: String, forms: List<String>) {
+        val transcript = transcriptOn(pc, root, id)
+        val message = mapOf("type" to "user", "message" to mapOf("role" to "user", "content" to "Altre forme: " + forms.joinToString(" | ")), "cwd" to root, "sessionId" to id)
+        val keyed = forms.withIndex().associate { (index, form) -> form to mapOf("backupFileName" to "leak@v${index + 1}", "version" to index + 1) }
+        val snapshot = mapOf("type" to "file-history-snapshot", "messageId" to "$id-u1", "snapshot" to mapOf("messageId" to "$id-u1", "trackedFileBackups" to keyed))
+        Files.writeString(transcript, Files.readString(transcript) + gson.toJson(message) + "\n" + gson.toJson(snapshot) + "\n")
+        val aux = transcript.resolveSibling(id).resolve("tool-results")
+        Files.writeString(aux.resolve("toolu_leak.txt"), forms.joinToString("\n") + "\n")
+        val backups = pc.home.resolve("file-history").resolve(id)
+        // The checkpoints the snapshot names exist; the first one also holds the forms as raw text.
+        forms.indices.forEach { index ->
+            Files.writeString(backups.resolve("leak@v${index + 1}"), if (index == 0) "// " + forms.joinToString(" | ") + "\n" else "// copia\n")
+        }
+    }
+
+    /** Exports the one session of [pc] and asserts that no entry, by name or by content, holds any of [forbidden]. */
+    private fun exportAndAssertNoneOf(pc: Pc, spelledHome: String, forbidden: List<String>): Pair<Path, ExportOutcome> {
+        val session = SessionScanner.listSessions(pc.home).single()
+        val archive = tmp.root.toPath().resolve("export.zip")
+        val outcome = exportFrom(pc, listOf(session), archive, spelledHome)
+        for ((name, bytes) in entriesOf(archive)) {
+            val text = String(bytes, Charsets.UTF_8)
+            for (form in forbidden) {
+                assertFalse("$name holds $form", name.contains(form, ignoreCase = true))
+                assertFalse("$name holds $form", text.contains(form, ignoreCase = true))
+            }
+        }
+        return archive to outcome
+    }
+
+    /** What PC_2 gets of such an archive: no token left, no failed check, and nothing of the source user. */
+    private fun importAndAssertNoTraceOf(archive: Path, name: String) {
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val outcome = SessionArchive.import(pc2.receive(archive, "leak.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = pc2.root.toString())
+        assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
+        assertEquals(emptyList<ImportFailure>(), outcome.failures)
+        assertNoTokens(pc2.home)
+        assertEquals(emptyList<String>(), traces(pc2.home, name))
+    }
+
+    @Test
+    fun `the archive names alice in none of the forms the engine review found, Git Bash and WSL 8-3, flags, colours, HOMEPATH, UNC and mixed separators`() {
+        val pc1 = Pc("PC_1", "alice")
+        writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        val forms = listOf(
+            // 8.3 home in the Git Bash, WSL, Cygwin, encoded and eight-backslash spellings (finding 1)
+            "/c/Users/ALICE~1/AppData/Local/Temp/claude/x",
+            "/mnt/c/Users/ALICE~1/AppData",
+            "/cygdrive/c/Users/ALICE~1/AppData",
+            "C--Users-ALICE-1-AppData-Local-Temp-x",
+            """C:\\\\\\\\Users\\\\\\\\ALICE~1\\\\\\\\x""",
+            // glued to a flag, an ANSI colour or a longer path (finding 2)
+            "gcc -IC:\\Users\\alice\\inc",
+            "\u001b[34mC:\\Users\\alice\\proj\u001b[0m",
+            "docker: /host_mnt/c/Users/alice/proj",
+            "cc -I/c/Users/alice/include",
+            "file%3A%2F%2F%2Fc%3A%2FUsers%2Falice%2Fx",
+            // HOMEPATH and the admin share (finding 8)
+            "HOMEPATH=\\Users\\alice",
+            "\\\\localhost\\c$\\Users\\alice\\x",
+            "\\\\?\\UNC\\localhost\\c$\\Users\\alice\\x",
+            // mixed and escaped separators (finding 9)
+            "C:\\/Users\\/alice\\/x",
+            "C:\\\\Users/alice",
+            "C://Users//alice",
+            "C:\\u005cUsers\\u005calice\\x",
+            "C:\\Users/alice\\x",
+        )
+        plantLeakForms(pc1, aliceRoot, "s-1", forms)
+        val (archive, outcome) = exportAndAssertNoneOf(pc1, "C:\\Users\\alice", listOf("alice"))
+
+        assertTrue(outcome.replacedByStyle.toString(), outcome.replacedByStyle.keys.containsAll(listOf("cyg", "enc", "esc3", "msys", "rel", "win", "wsl")))
+        assertEquals(0, outcome.residualUserNameHits)
+        importAndAssertNoTraceOf(archive, "alice")
+    }
+
+    @Test
+    fun `the archive names Zoe Muller in none of the forms the engine review found, unicode escapes, partial percent, NFD, shell escapes`() {
+        val pc1 = Pc("PC_1", "Zoë Müller")
+        val zoeRoot = "C:\\Users\\Zoë Müller\\Mes Projets\\démo"
+        writePc1Session(pc1.home, "s-1", zoeRoot, "Ajoute un test", user = "Zoë Müller")
+        val forms = listOf(
+            // the name as JSON unicode escapes, one level of escaping deeper (finding 3)
+            "C:\\\\Users\\\\Zo\\u00eb M\\u00fcller\\\\x",
+            "C:\\\\Users\\\\Zo\\u00EB M\\u00FCller\\\\x",
+            // partially percent-encoded URIs (finding 4)
+            "file:/C:/Users/Zo%C3%AB%20M\u00fcller/x",
+            "file:/C:/Users/Zo\u00eb+M\u00fcller/x",
+            // decomposed, as macOS writes it (finding 5)
+            "C:\\Users\\Zoe\u0308 Mu\u0308ller\\x",
+            "C:/Users/Zoe%CC%88%20Mu%CC%88ller/x",
+            // spaces escaped for a shell (finding 7)
+            "cd /c/Users/Zo\u00eb\\ M\u00fcller/proj",
+            "cd C:\\Users\\Zo\u00eb` M\u00fcller\\proj",
+            // the 8.3 name, with the letters Windows keeps (finding 1)
+            "/c/Users/ZOMLLE~1/AppData",
+        )
+        plantLeakForms(pc1, zoeRoot, "s-1", forms)
+        val forbidden = listOf(
+            "Zo\u00eb", "Zoe\u0308", "Zo\\u00eb", "M\u00fcller", "Mu\u0308ller", "M\\u00fcller", "Zo%C3%AB", "M%C3%BCller", "ZOMLLE", "Mu%CC%88ller",
+        )
+        val (archive, _) = exportAndAssertNoneOf(pc1, "C:\\Users\\Zo\u00eb M\u00fcller", forbidden)
+        importAndAssertNoTraceOf(archive, "Müller")
+    }
+
+    @Test
+    fun `the archive names a dotted account in none of the 8-3 forms Windows gives it`() {
+        val pc1 = Pc("PC_1", "alice.smith")
+        val smithRoot = "C:\\Users\\alice.smith\\progetti\\demo"
+        writePc1Session(pc1.home, "s-1", smithRoot, "Aggiungi un test", user = "alice.smith")
+        val forms = listOf(
+            // alice.smith is ALICE~1.SMI to Windows (finding 11)
+            "C:\\Users\\ALICE~1.SMI\\AppData\\Local\\Temp",
+            "/c/Users/ALICE~1.SMI/x",
+            "C--Users-ALICE-1-SMI-AppData-Local-Temp-x",
+            "C:\\\\Users\\\\ALICE~1.SMI\\\\x",
+        )
+        plantLeakForms(pc1, smithRoot, "s-1", forms)
+        val session = SessionScanner.listSessions(pc1.home).single()
+        val archive = tmp.root.toPath().resolve("export.zip")
+        val outcome = exportFrom(pc1, listOf(session), archive, "C:\\Users\\alice.smith")
+        for ((name, bytes) in entriesOf(archive)) {
+            val text = String(bytes, Charsets.UTF_8)
+            assertFalse("$name holds a short name", text.contains("~1", ignoreCase = true) || name.contains("~1", ignoreCase = true))
+            assertFalse("$name holds the surname", text.contains("smith", ignoreCase = true) || name.contains("smith", ignoreCase = true))
+        }
+        assertEquals(0, outcome.residualUserNameHits)
+    }
+
     @Test
     fun `export keeps every unchanged line byte for byte and the line endings of each line`() {
         val pc1 = Pc("PC_1", "alice")
