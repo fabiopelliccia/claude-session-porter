@@ -3,7 +3,6 @@ package com.github.fabiopelliccia.claudesessionsimportexport.core
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
-import com.google.gson.JsonParser
 import java.time.Duration
 
 /**
@@ -88,8 +87,8 @@ class TranscriptRewriter(
             val line = rawLine.removeSuffix("\r")
             if (line.isBlank()) return@joinToString rawLine
             stats.lines++
-            val obj = runCatching { JsonParser.parseString(line) }.getOrNull()
-                ?.takeIf { it.isJsonObject }?.asJsonObject
+            // Strictly, as the export and the token pass do: a line only a lenient parser accepts is raw text in all of them.
+            val obj = JsonLines.parse(line)?.takeIf { it.isJsonObject }?.asJsonObject
             if (obj == null) {
                 stats.unparsableLines++
                 return@joinToString rawLine

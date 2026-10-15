@@ -162,7 +162,7 @@ object SessionArchive {
                 sessions = sessions
                     .map { requireClaudeSession(it, manifest.producer) }
                     .map { session -> requireSafeNames(session, manifest.isAnonymized) }
-                    .map { session -> session.copy(summary = titleOf(zip, session)) },
+                    .map { session -> session.copy(summary = titleOf(zip, session)?.let { readableTitle(it, session, manifest) }) },
             )
         }
     }
@@ -221,6 +221,23 @@ object SessionArchive {
         return runCatching {
             zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).use { SessionTitle.of(it) }
         }.getOrNull() ?: session.summary
+    }
+
+    /**
+     * [title] as the import table shows it: the tokens of an anonymized archive are of no use to a person, so a token of the
+     * project is its name (`~` when the manifest carries none, which is when the project is the home itself), one of the home
+     * is `~` and one of the Claude home is `~/.claude`. Only the table: the archive and the import keep the tokens.
+     */
+    private fun readableTitle(title: String, session: SessionInfo, manifest: ArchiveManifest): String {
+        val prefix = manifest.anonymization?.takeIf { manifest.isAnonymized }?.tokenPrefix ?: return title
+        if (!PathTokens.contains(title, prefix)) return title
+        return PathTokens.regex(prefix).replace(title) { token ->
+            when (PathKind.valueOf(token.groupValues[1])) {
+                PathKind.ROOT -> session.projectName ?: "~"
+                PathKind.HOME -> "~"
+                PathKind.CLAUDE_HOME -> "~/.claude"
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------- import --
@@ -389,6 +406,8 @@ object SessionArchive {
 
         val targetFile = targetDir.resolve("$writtenId.jsonl")
         val rewriter = TranscriptRewriter(session.id, writtenId.takeIf { it != session.id }, mapper, delta)
+        // A copy under a new id has paths into the files of the session it was copied from to follow along.
+        val ownPaths = if (tokens != null && writtenId != session.id) OwnSessionPaths(session.id, writtenId, folderName) else null
 
         // The whole session is built in a staging folder first and moved into the Claude home only
         // when it is complete: a corrupt entry must not leave half a session behind, nor take the
@@ -402,7 +421,8 @@ object SessionArchive {
                 // string and key is rendered for this machine. Never the byte copy, whatever else is identity.
                 val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
                 val structural = rewriter.rewrite(text, stats)
-                Files.write(staging.transcript, tokens.deanonymizer.deanonymizeJsonl(structural, rendered).toByteArray(StandardCharsets.UTF_8))
+                val final = tokens.deanonymizer.deanonymizeJsonl(structural, rendered)
+                Files.write(staging.transcript, (ownPaths?.renamed(final) ?: final).toByteArray(StandardCharsets.UTF_8))
             } else if (rewriter.isIdentity) {
                 zip.getInputStream(transcriptEntry).use { Files.copy(it, staging.transcript, StandardCopyOption.REPLACE_EXISTING) }
                 log.line("transcript copied byte for byte")
@@ -424,7 +444,7 @@ object SessionArchive {
             // except in a format 2 archive, where every text file (and every entry name) has its tokens rendered.
             val auxStats = TranscriptRewriter.Stats()
             val auxRendered = PathDeanonymizer.Stats()
-            val aux = extractEntries(zip, auxPrefix(session.id), staging.auxDir, rewriter.takeIf { !it.isIdentity }, auxStats, tokens?.deanonymizer, auxRendered)
+            val aux = extractEntries(zip, auxPrefix(session.id), staging.auxDir, rewriter.takeIf { !it.isIdentity }, auxStats, tokens?.deanonymizer, auxRendered, ownPaths)
             log.kv("aux.filesWritten", aux.written)
             log.kv("aux.rewrittenTranscripts", aux.rewritten)
             for ((field, count) in auxStats.changes) log.kv("aux.changed.$field", count)
@@ -432,7 +452,7 @@ object SessionArchive {
             val historyRendered = PathDeanonymizer.Stats()
             val fileHistory = extractEntries(
                 zip, fileHistoryPrefix(session.id), staging.fileHistoryDir,
-                deanonymizer = tokens?.deanonymizer, rendered = historyRendered,
+                deanonymizer = tokens?.deanonymizer, rendered = historyRendered, ownPaths = ownPaths,
             )
             log.kv("fileHistory.filesWritten", fileHistory.written)
             if (tokens != null) logRendered(log, "fileHistory", historyRendered)
@@ -512,6 +532,7 @@ object SessionArchive {
         stats: TranscriptRewriter.Stats = TranscriptRewriter.Stats(),
         deanonymizer: PathDeanonymizer? = null,
         rendered: PathDeanonymizer.Stats = PathDeanonymizer.Stats(),
+        ownPaths: OwnSessionPaths? = null,
     ): Extraction {
         var written = 0
         var rewritten = 0
@@ -531,8 +552,8 @@ object SessionArchive {
             if (isTranscript) {
                 val text = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
                 val structural = rewriter!!.rewrite(text, stats)
-                val final = deanonymizer?.deanonymizeJsonl(structural, rendered) ?: structural
-                Files.write(target, final.toByteArray(StandardCharsets.UTF_8))
+                val renderedText = deanonymizer?.deanonymizeJsonl(structural, rendered) ?: structural
+                Files.write(target, (ownPaths?.renamed(renderedText) ?: renderedText).toByteArray(StandardCharsets.UTF_8))
                 rewritten++
             } else if (deanonymizer != null) {
                 val bytes = zip.getInputStream(entry).use { readAtMost(it, LARGE_FILE_BYTES) }
@@ -542,8 +563,8 @@ object SessionArchive {
                 } else {
                     // Text is rendered in the encoding it was exported in (UTF-8, or UTF-16 with a BOM); anything else is copied.
                     val decoded = decodeTextFile(bytes)
-                    val final = decoded?.let { deanonymizer.deanonymizeText(it.text, rendered) }
-                    Files.write(target, if (decoded == null || final == decoded.text) bytes else decoded.encode(final!!))
+                    val renderedText = decoded?.let { deanonymizer.deanonymizeText(it.text, rendered) }?.let { ownPaths?.renamed(it) ?: it }
+                    Files.write(target, if (decoded == null || renderedText == decoded.text) bytes else decoded.encode(renderedText!!))
                 }
             } else {
                 zip.getInputStream(entry).use { input -> Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING) }
@@ -551,6 +572,26 @@ object SessionArchive {
             written++
         }
         return Extraction(written, discarded, rewritten)
+    }
+
+    /**
+     * A session imported as a copy (under a new id) has paths into its own files in what it says: where Claude Code saved a
+     * tool result, `<Claude home>\projects\<folder>\<id>\tool-results\x.txt`, and the backups of the checkpoints below
+     * `file-history\<id>\`. They point into the session it was copied from, which is not the copy: [renamed] changes the id in
+     * them, and only in them (the folder is the one the copy is written to, so a path of another session is left alone). The
+     * separators are any run of slashes and backslashes, so it works on the raw text of a JSON line as well as on a decoded one.
+     */
+    private class OwnSessionPaths(private val sourceId: String, private val writtenId: String, folderName: String) {
+
+        private val pattern = Regex(
+            "((?:projects[\\\\/]+" + Regex.escape(folderName) + "|file-history)[\\\\/]+)" + Regex.escape(sourceId) + "(?=[\\\\/])",
+            RegexOption.IGNORE_CASE,
+        )
+
+        fun renamed(text: String): String {
+            if (!text.contains(sourceId, ignoreCase = true)) return text
+            return pattern.replace(text) { match -> match.groupValues[1] + writtenId }
+        }
     }
 
     /** What the import of a format 2 archive renders its tokens with, built once per import. */
