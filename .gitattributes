@@ -1,0 +1,4 @@
+# The bytes of the CLI jar must not depend on the line endings a checkout happened to use.
+*.properties text eol=lf
+LICENSE text eol=lf
+cli/src/main/licenses/* text eol=lf

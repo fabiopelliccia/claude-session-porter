@@ -1,0 +1,10 @@
+Third-party software bundled in session-porter.jar
+===================================================
+
+All of it is licensed under the Apache License, Version 2.0 (see Apache-2.0.txt in this folder).
+
+- Kotlin standard library (org.jetbrains.kotlin:kotlin-stdlib), Copyright JetBrains s.r.o. and Kotlin Programming Language contributors
+- JetBrains annotations (org.jetbrains:annotations), Copyright JetBrains s.r.o.
+- Gson (com.google.code.gson:gson), Copyright Google Inc.
+
+Session Porter itself is licensed under the MIT License (see session-porter-LICENSE.txt).
