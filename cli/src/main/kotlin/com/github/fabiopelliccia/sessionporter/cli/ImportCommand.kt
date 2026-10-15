@@ -4,6 +4,7 @@ import com.github.fabiopelliccia.claudesessionsimportexport.core.ConflictPolicy
 import com.github.fabiopelliccia.claudesessionsimportexport.core.ImportEnvironment
 import com.github.fabiopelliccia.claudesessionsimportexport.core.ImportOutcome
 import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionArchive
+import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionLabeler
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Paths
@@ -27,14 +28,16 @@ internal class ImportCommand(private val context: CommandContext) {
         val target = targetOption(manifest.isAnonymized)
         val ids = idsOption(manifest)
         val home = context.requireHome()
+        // Every path option is read before anything is written: a bad one must not be found out afterwards.
+        val logDirectory = context.logDirectory
 
         val warnings = mutableListOf<String>()
         if (target != null && !isExistingFolder(target)) warnings += CliBundle.message("warning.targetNotFound", target)
 
         context.log.info("importing ${ids?.size ?: manifest.sessions.size} sessions (policy ${policy.name}) into $home")
         val shift = !line.flag("--no-shift")
-        val logged = LogLocations.withLog(context.logDirectory, "import", context.now()) { log, file ->
-            val outcome = try {
+        val logged = LogLocations.withLog(logDirectory, "import", context.now()) { log ->
+            try {
                 SessionArchive.import(
                     archive = archive.path,
                     sessionIds = ids,
@@ -46,15 +49,15 @@ internal class ImportCommand(private val context: CommandContext) {
                     log = log,
                     environment = ImportEnvironment(pluginVersion = CliVersion.value, ideBuild = null, productName = CliVersion.PRODUCT_NAME),
                     userHome = context.environment.userHome,
+                    labeler = SessionLabeler.ID,
                 )
             } catch (e: Exception) {
                 // The log is what a person reads to find out what went wrong, so it gets the failure too.
                 log.failure("import failed", e)
                 throw e
             }
-            outcome to LogLocations.existing(file)
         }
-        return resultOf(logged.first, policy, target, logged.second, warnings)
+        return resultOf(logged.result, policy, target, logged.logFile, warnings)
     }
 
     // ----------------------------------------------------------------------------------- options --
@@ -80,8 +83,10 @@ internal class ImportCommand(private val context: CommandContext) {
 
     /** The sessions to import, `null` for all of them; an id the archive does not hold is a mistake. */
     private fun idsOption(manifest: SessionArchive.ArchiveManifest): Set<String>? {
+        if (!line.isGiven("--ids")) return null
         val ids = SessionIds.fromOption(context)
-        if (ids.isEmpty()) return null
+        // `--ids ""` is a selection of nothing, not of everything: with REPLACE the difference is deleted sessions.
+        if (ids.isEmpty()) throw usageError("noSessions", "error.usage.noSessionsToImport")
         val unknown = ids.filter { id -> manifest.sessions.none { it.id == id } }
         if (unknown.isNotEmpty()) throw usageError("unknownSessions", "error.usage.unknownArchiveSessions", unknown.joinToString(", "))
         return ids.toSet()

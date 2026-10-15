@@ -77,13 +77,16 @@ class OutputTest : CliTest() {
     @Test
     fun `no conversation text reaches the JSON of an export or an import, only names and counts`() {
         val alice = claudeHomeOf("alice")
-        writeSession(alice, "s-1", aliceWork, title = "SECRET-PROMPT-TEXT")
-        val export = run("--json", "--home", alice.toString(), "export", "--all", "--out", root.resolve("e.zip").toString(), "--log-dir", logDir.toString())
+        val transcript = writeSession(alice, "s-1", aliceWork, title = "SECRET-PROMPT-TEXT")
+        // A line still being written makes the export warn: the test is only worth something if there is a warning to look at.
+        Files.writeString(transcript, Files.readString(transcript) + "{\"type\":\"user\",\"cw")
+        val export = run("--json", "--verbose", "--home", alice.toString(), "export", "--all", "--out", root.resolve("e.zip").toString(), "--log-dir", logDir.toString())
         val target = Files.createDirectories(root.resolve("bob").resolve("work")).toString()
-        val import = run("--json", "--home", claudeHomeOf("bob").toString(), "import", root.resolve("e.zip").toString(), "--target", target, "--log-dir", logDir.toString())
+        val import = run("--json", "--verbose", "--home", claudeHomeOf("bob").toString(), "import", root.resolve("e.zip").toString(), "--target", target, "--log-dir", logDir.toString())
 
-        assertFalse(export.out, export.out.contains("SECRET-PROMPT-TEXT"))
-        assertFalse(import.out, import.out.contains("SECRET-PROMPT-TEXT"))
+        assertTrue("the export has a warning: ${export.out}", export.json().getAsJsonArray("warnings").size() > 0)
+        assertFalse(export.out + export.err, (export.out + export.err).contains("SECRET-PROMPT-TEXT"))
+        assertFalse(import.out + import.err, (import.out + import.err).contains("SECRET-PROMPT-TEXT"))
         Files.list(logDir).use { logs -> logs.forEach { assertFalse("$it", Files.readString(it).contains("SECRET-PROMPT-TEXT")) } }
         // The title is what `list` and `inspect` are for.
         assertTrue(run("--json", "--home", alice.toString(), "list").out.contains("SECRET-PROMPT-TEXT"))

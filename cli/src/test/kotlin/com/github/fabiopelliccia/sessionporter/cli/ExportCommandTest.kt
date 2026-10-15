@@ -150,6 +150,72 @@ class ExportCommandTest : CliTest() {
     }
 
     @Test
+    fun `--strict-privacy also fails on a finding in a file that is not text, and only on that`() {
+        val home = claudeHomeOf("alice")
+        writeSession(home, "s-1", aliceWork)
+        // 0xFF is not valid in UTF-8 and the length is odd, so it is not UTF-16 either: copied as it is, and scanned.
+        val binary = byteArrayOf(0xFF.toByte(), 0x00, 0x01) + "built by alice".toByteArray()
+        Files.write(Files.createDirectories(home.resolve("projects").resolve("C--Users-alice-work").resolve("s-1").resolve("tool-results")).resolve("name.bin"), binary)
+
+        val strict = export("--home", home.toString(), "export", "--all", "--out", root.resolve("strict.zip").toString(), "--strict-privacy")
+
+        assertEquals(strict.out, ExitCode.PRIVACY, strict.exitCode)
+        assertEquals("privacyFindings", strict.json().getAsJsonObject("error").get("code").asString)
+        val anonymization = strict.data().getAsJsonObject("anonymization")
+        assertEquals("no bare user name in any text, the only hit is the binary file", 0, anonymization.get("residualUserNameHits").asInt)
+        assertEquals(listOf("sessions/s-1/aux/tool-results/name.bin"), anonymization.getAsJsonArray("binaryEntriesWithHits").map { it.asString })
+        assertFalse("no archive", Files.exists(root.resolve("strict.zip")))
+
+        // Without the option the archive is written, and the finding is a warning.
+        val lenient = export("--home", home.toString(), "export", "--all", "--out", root.resolve("lenient.zip").toString())
+        assertEquals(lenient.out, 0, lenient.exitCode)
+        assertTrue(lenient.data().get("privacyFindings").asBoolean)
+        assertEquals(1, lenient.json().getAsJsonArray("warnings").size())
+    }
+
+    @Test
+    fun `a file that cannot be read makes the export partial, exit 5, and the archive is still written`() {
+        val home = claudeHomeOf("alice")
+        writeSession(home, "s-1", aliceWork)
+        val locked = writeAux(home, aliceWork, "s-1", "locked.txt", "content")
+        val unreadable = makeUnreadable(locked)
+        org.junit.Assume.assumeTrue("this system cannot make a file unreadable to its owner", unreadable != null)
+        try {
+            val archive = root.resolve("out.zip")
+
+            val result = export("--home", home.toString(), "export", "--all", "--out", archive.toString())
+
+            assertEquals(result.out + result.err, ExitCode.PARTIAL, result.exitCode)
+            val json = result.json()
+            assertEquals("partialExport", json.getAsJsonObject("error").get("code").asString)
+            assertEquals(1, json.getAsJsonObject("data").get("unreadableFiles").asInt)
+            assertEquals("the session itself is in", 1, json.getAsJsonObject("data").get("exportedCount").asInt)
+            assertEquals(archive.toAbsolutePath().toString(), json.getAsJsonObject("data").get("archive").asString)
+            assertEquals(setOf("s-1"), sessionIdsIn(archive))
+            assertEquals(1, json.getAsJsonArray("warnings").size())
+            assertTrue(json.getAsJsonArray("warnings")[0].asString, json.getAsJsonArray("warnings")[0].asString.contains("locked.txt"))
+        } finally {
+            unreadable!!.close()
+        }
+    }
+
+    /**
+     * Makes [file] unreadable to this process until the result is closed: a lock on Windows (where it is mandatory),
+     * no permissions on a system that honours them. `null` when neither works (a POSIX root reads everything).
+     */
+    private fun makeUnreadable(file: java.nio.file.Path): AutoCloseable? {
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            val channel = java.nio.channels.FileChannel.open(file, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE)
+            channel.lock()
+            return AutoCloseable { channel.close() }
+        }
+        val permissions = java.nio.file.attribute.PosixFilePermissions.fromString("---------")
+        Files.setPosixFilePermissions(file, permissions)
+        if (Files.isReadable(file)) return null
+        return AutoCloseable { Files.setPosixFilePermissions(file, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")) }
+    }
+
+    @Test
     fun `--strict-privacy fails with exit 6 and leaves no archive behind`() {
         val home = claudeHomeOf("alice")
         writeSession(home, "s-1", aliceWork, extraLines = listOf(lineWithBareUserName("s-1", aliceWork, "alice")))

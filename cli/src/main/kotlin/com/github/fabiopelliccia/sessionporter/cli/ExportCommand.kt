@@ -6,9 +6,12 @@ import com.github.fabiopelliccia.claudesessionsimportexport.core.ImportLog
 import com.github.fabiopelliccia.claudesessionsimportexport.core.ProducerInfo
 import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionArchive
 import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionInfo
+import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionLabeler
 import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionScanner
+import java.io.IOException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.nio.file.NotDirectoryException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.format.DateTimeFormatter
@@ -17,9 +20,9 @@ import java.util.UUID
 /**
  * `export (--ids a,b | --ids-file <f|-> | --all | --project <path>) --out <file.zip|dir> [--force] [--strict-privacy]`.
  *
- * The archive is written next to its destination under a temporary name and put in place only once it
- * is known to be acceptable: a destination that exists is never touched without `--force`, and a
- * strict privacy check that fails leaves no archive behind.
+ * The archive is built in a temporary folder of the system and put at its destination only once it is known
+ * to be acceptable: a destination that exists is never touched without `--force`, a strict privacy check that
+ * fails leaves no archive and no folder behind, and an interrupted run removes its temporary files.
  */
 internal class ExportCommand(private val context: CommandContext) {
 
@@ -29,8 +32,11 @@ internal class ExportCommand(private val context: CommandContext) {
         val selector = selectorOption()
         val out = line.value("--out") ?: throw usageError("outRequired", "error.usage.outRequired")
         val destination = destinationOf(out)
+        // Every path option is read before any work is done: a bad one must not be found out afterwards.
+        val logDirectory = context.logDirectory
         val force = line.flag("--force")
         if (Files.exists(destination) && !force) throw outputExists(destination)
+        requireFolderCanBeCreated(destination.toAbsolutePath().parent)
 
         val home = context.requireHome()
         val sessions = selectSessions(selector, SessionScanner.listSessions(home))
@@ -39,22 +45,22 @@ internal class ExportCommand(private val context: CommandContext) {
 
         val strict = line.flag("--strict-privacy")
         val startedAt = System.currentTimeMillis()
-        val parent = destination.toAbsolutePath().parent
-        Files.createDirectories(parent)
-        // The core writes through a temporary file of its own and moves it over the path it is given: that path is
-        // itself a temporary one, so nothing exists at the destination until the whole export is accepted.
-        val pending = parent.resolve(".session-porter-${UUID.randomUUID()}.zip.part")
+        // The archive is built in a folder of its own in the system temp folder, which no sync client watches: an
+        // archive that the strict check then refuses never shows up in a OneDrive or Dropbox folder, not even for a
+        // moment. The core builds it through a temporary file of its own in the same folder, so one removal takes both.
+        val workFolder = context.pending.track(Files.createTempDirectory(context.environment.tempDirectory, "session-porter-"))
         try {
+            val pending = workFolder.resolve(PENDING_ARCHIVE)
             val outcome = SessionArchive.export(
                 sessions, pending, home, context.log.progress, ProducerInfo(CliVersion.COMPONENT, CliVersion.value),
+                labeler = SessionLabeler.ID,
             )
             val refused = strict && outcome.hasPrivacyFindings
-            if (!refused) moveIntoPlace(pending, destination, force)
-            val size = if (refused) null else Files.size(destination)
-            val logFile = writeLog(selector, sessions.size, outcome, refused, System.currentTimeMillis() - startedAt)
+            val size = if (refused) null else publish(pending, destination, force)
+            val logFile = writeLog(logDirectory, selector, sessions.size, outcome, refused, System.currentTimeMillis() - startedAt)
             return resultOf(destination, size, sessions.size, outcome, refused, logFile)
         } finally {
-            Files.deleteIfExists(pending)
+            context.pending.discard(workFolder)
         }
     }
 
@@ -103,13 +109,71 @@ internal class ExportCommand(private val context: CommandContext) {
     private fun outputExists(destination: Path) =
         CliException(ExitCode.ENVIRONMENT, "outputExists", CliBundle.message("error.outputExists", destination.toAbsolutePath()))
 
-    private fun moveIntoPlace(pending: Path, destination: Path, force: Boolean) {
+    /** The folders of the destination that do not exist yet can only be made if what is in their way is a folder. */
+    private fun requireFolderCanBeCreated(folder: Path) {
+        var existing: Path? = folder
+        while (existing != null && !Files.exists(existing)) existing = existing.parent
+        if (existing != null && !Files.isDirectory(existing)) throw NotDirectoryException(existing.toString())
+    }
+
+    /**
+     * Puts the finished archive at [destination] and returns its size. This is the one step that makes anything
+     * appear there, and it runs as a whole or not at all (see [PendingFiles.commit]).
+     *
+     * The archive first goes to a temporary name in the folder of the destination, and only then takes its final
+     * name: that second step is a rename inside one folder, so a half-copied archive (the temp folder is often on
+     * another volume) never carries the name of the real one. The folders that had to be created are removed again
+     * when something fails.
+     */
+    private fun publish(pending: Path, destination: Path, force: Boolean): Long = context.pending.commit {
+        val folder = destination.toAbsolutePath().parent
+        val createdFolders = createMissingFolders(folder)
+        val staged = context.pending.track(folder.resolve(".session-porter-${UUID.randomUUID()}.zip.tmp"))
+        try {
+            moveOrCopy(pending, staged)
+            moveIntoPlace(staged, destination, force)
+            Files.size(destination)
+        } catch (e: Throwable) {
+            createdFolders.asReversed().forEach { runCatching { Files.deleteIfExists(it) } }
+            throw e
+        } finally {
+            context.pending.discard(staged)
+        }
+    }
+
+    /** Creates the folders of [folder] that are missing and returns them, the outermost first; the ones that were there stay out. */
+    private fun createMissingFolders(folder: Path): List<Path> {
+        val missing = generateSequence(folder) { it.parent }.takeWhile { !Files.exists(it) }.toList().asReversed()
+        val created = mutableListOf<Path>()
+        try {
+            for (path in missing) {
+                Files.createDirectory(path)
+                created.add(path)
+            }
+        } catch (e: IOException) {
+            created.asReversed().forEach { runCatching { Files.deleteIfExists(it) } }
+            throw e
+        }
+        return created
+    }
+
+    /** A rename when the two are on one volume; otherwise a copy, after which the original is of no use. */
+    private fun moveOrCopy(source: Path, target: Path) {
+        try {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: IOException) {
+            Files.copy(source, target)
+            Files.deleteIfExists(source)
+        }
+    }
+
+    private fun moveIntoPlace(staged: Path, destination: Path, force: Boolean) {
         if (force) {
-            Files.move(pending, destination, StandardCopyOption.REPLACE_EXISTING)
+            Files.move(staged, destination, StandardCopyOption.REPLACE_EXISTING)
         } else {
             // Without REPLACE_EXISTING a file that appeared in the meantime makes this fail instead of being overwritten.
             try {
-                Files.move(pending, destination)
+                Files.move(staged, destination)
             } catch (_: FileAlreadyExistsException) {
                 throw outputExists(destination)
             }
@@ -182,8 +246,8 @@ internal class ExportCommand(private val context: CommandContext) {
     // -------------------------------------------------------------------------------------- log --
 
     /** `export-*.log`: counts only, never a title or a line of a conversation. Returns the file when it could be written. */
-    private fun writeLog(selector: String, requested: Int, outcome: ExportOutcome, refused: Boolean, durationMs: Long): String? =
-        LogLocations.withLog(context.logDirectory, "export", context.now()) { log, file ->
+    private fun writeLog(logDirectory: Path, selector: String, requested: Int, outcome: ExportOutcome, refused: Boolean, durationMs: Long): String? =
+        LogLocations.withLog(logDirectory, "export", context.now()) { log ->
             writeEnvironment(log)
             log.section(ClaudeSessionsBundle.message("log.section.context"))
             log.kv("selector", selector)
@@ -207,8 +271,7 @@ internal class ExportCommand(private val context: CommandContext) {
             log.kv("privacyFindings", outcome.hasPrivacyFindings)
             log.kv("archiveWritten", !refused)
             log.kv("durationMs", durationMs)
-            LogLocations.existing(file)
-        }
+        }.logFile
 
     private fun writeEnvironment(log: ImportLog) {
         log.section(ClaudeSessionsBundle.message("log.section.environment"))
@@ -219,6 +282,7 @@ internal class ExportCommand(private val context: CommandContext) {
     }
 
     private companion object {
+        const val PENDING_ARCHIVE = "archive.zip.part"
         val SELECTORS = listOf("--ids", "--ids-file", "--all", "--project")
         val FILE_STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
     }

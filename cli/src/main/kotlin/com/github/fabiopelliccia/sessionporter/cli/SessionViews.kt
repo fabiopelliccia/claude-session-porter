@@ -3,6 +3,7 @@ package com.github.fabiopelliccia.sessionporter.cli
 import com.github.fabiopelliccia.claudesessionsimportexport.core.ClaudePaths
 import com.github.fabiopelliccia.claudesessionsimportexport.core.SessionInfo
 import java.time.Clock
+import java.time.DateTimeException
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -42,11 +43,15 @@ internal object SessionViews {
     /** [title] cut to [limit] characters for a table cell. */
     fun cell(title: String, limit: Int = 60): String = if (title.length > limit) title.take(limit - 1).trimEnd() + "…" else title
 
-    /** Whether [session] was recorded in [project], a path as [PathInput.normalize] returns it (or the folder Claude Code made of it). */
+    /**
+     * Whether [session] was recorded in [project], a path as [PathInput.normalize] returns it. The folder name Claude Code
+     * made of a path is no proof: `C:\work\b-c` and `C:\work\b\c` share one, so as soon as the session says where it was
+     * recorded only that path counts, and the folder name decides only for a session that does not say.
+     */
     fun isInProject(session: SessionInfo, project: String): Boolean {
         val ignoreCase = ClaudePaths.isWindowsStyle(project)
-        if (session.projectFolderName.equals(ClaudePaths.encodeProjectPath(project), ignoreCase)) return true
-        val recorded = session.projectPath?.let(ClaudePaths::normalizeProjectPath) ?: return false
+        val recorded = session.projectPath?.let(ClaudePaths::normalizeProjectPath)
+            ?: return session.projectFolderName.equals(ClaudePaths.encodeProjectPath(project), ignoreCase)
         return recorded.equals(project, ignoreCase)
     }
 
@@ -58,12 +63,20 @@ internal object SessionViews {
         val relative = Regex("^(\\d+)([hdw])$", RegexOption.IGNORE_CASE).matchEntire(text.trim())
         if (relative != null) {
             val amount = relative.groupValues[1].toLongOrNull() ?: throw invalidSince(text)
-            val duration = when (relative.groupValues[2].lowercase()) {
-                "h" -> Duration.ofHours(amount)
-                "d" -> Duration.ofDays(amount)
-                else -> Duration.ofDays(amount * 7)
+            return try {
+                val duration = when (relative.groupValues[2].lowercase()) {
+                    "h" -> Duration.ofHours(amount)
+                    "d" -> Duration.ofDays(amount)
+                    else -> Duration.ofDays(Math.multiplyExact(amount, 7L))
+                }
+                clock.instant().minus(duration)
+            } catch (_: ArithmeticException) {
+                // So many days that the number does not fit a duration ...
+                throw invalidSince(text)
+            } catch (_: DateTimeException) {
+                // ... or fits it, but the moment it points to is before the first instant that can be written.
+                throw invalidSince(text)
             }
-            return clock.instant().minus(duration)
         }
         val zone = clock.zone
         return try {

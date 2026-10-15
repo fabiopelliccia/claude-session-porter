@@ -1,6 +1,8 @@
 package com.github.fabiopelliccia.sessionporter.cli
 
+import com.github.fabiopelliccia.claudesessionsimportexport.core.UnusableArchiveException
 import java.io.IOException
+import java.io.UncheckedIOException
 import java.util.IllformedLocaleException
 import java.util.Locale
 
@@ -12,40 +14,90 @@ import java.util.Locale
  * In `--json` mode standard output holds exactly one document, the envelope, for a success and for
  * every failure alike; in plain mode the result goes to standard output and warnings and errors to
  * standard error. Standard error also carries the progress, but only with `--verbose`.
+ *
+ * An instance runs one command line. If the process is stopped meanwhile, [interrupt] (called from a
+ * shutdown hook) removes the temporary files and prints the envelope of the interruption instead of the result.
  */
 internal class SessionPorterCli(private val environment: CliEnvironment) {
+
+    private val pending = PendingFiles()
+
+    /** Held while deciding who prints the one result: the command that finished, or the interruption. */
+    private val outputLock = Any()
+    private var outputClaimed = false
+
+    // What the interruption needs to know, whenever it comes.
+    @Volatile private var jsonMode = false
+    @Volatile private var commandName: String? = null
 
     fun run(args: List<String>): Int {
         // The two global options are read before the command line is parsed, so that a mistake in it is
         // reported in the language and in the form (JSON or plain) that were asked for.
         val options = args.takeWhile { it != "--" }
         val json = CommandSpecs.JSON in options
+        jsonMode = json
         val log = CliLog(CommandSpecs.VERBOSE in options, environment.err)
 
         // The language is global to the JVM: put back what it was, so that a process that runs the CLI twice
         // (the tests do) does not carry one run's language into the next.
         val previousLanguage = Locale.getDefault(Locale.Category.DISPLAY)
         try {
-            var command: String? = null
             val result = try {
                 applyLanguage(valueOf(options, CommandSpecs.LANG))
-                val line = ArgumentParser.parse(args)
-                command = line.command
-                dispatch(CommandContext(line, environment, log))
+                val line = try {
+                    ArgumentParser.parse(args)
+                } catch (e: CliException) {
+                    // A mistake after the command word is still a mistake of that command.
+                    commandName = ArgumentParser.commandWord(args)
+                    throw e
+                }
+                commandName = line.command
+                dispatch(CommandContext(line, environment, log, pending))
+            } catch (e: CommandInterrupted) {
+                // The interruption has printed its own result (or is about to): there is nothing left to say.
+                return ExitCode.INTERRUPTED
             } catch (e: CliException) {
                 failure(e.exitCode, e.code, e.message ?: e.code, e.data)
+            } catch (e: UnusableArchiveException) {
+                val problem = ArchiveAccess.classify(e)
+                failure(problem.exitCode, problem.code, problem.message ?: problem.code)
             } catch (e: IOException) {
-                failure(ExitCode.ENVIRONMENT, "ioError", CliBundle.message("error.io", e.message ?: e.javaClass.simpleName))
+                ioFailure(e.message ?: e.javaClass.simpleName)
+            } catch (e: UncheckedIOException) {
+                ioFailure(e.cause?.message ?: e.message ?: e.javaClass.simpleName)
+            } catch (e: OutOfMemoryError) {
+                // Not a bug of the CLI: the sessions are too big for the memory Java was given.
+                failure(ExitCode.INTERNAL, "outOfMemory", CliBundle.message("error.outOfMemory"))
             } catch (e: Throwable) {
                 // Whatever else it is, it is a bug in the CLI: say so, and with `--verbose` say where.
                 log.info(e.stackTraceToString())
                 failure(ExitCode.INTERNAL, "internalError", CliBundle.message("error.internal", "${e.javaClass.simpleName}: ${e.message}"))
             }
-            print(command, result, json)
+            if (!claimOutput()) return ExitCode.INTERRUPTED
+            print(commandName, result, json)
             return result.exitCode
         } finally {
             Locale.setDefault(Locale.Category.DISPLAY, previousLanguage)
         }
+    }
+
+    /**
+     * Called when the process is being stopped (Ctrl+C, SIGTERM) from the shutdown hook: removes the temporary files of
+     * the run and prints the result of an interrupted command. Returns `false` when the command had already printed
+     * its own result, in which case there is nothing to add.
+     */
+    fun interrupt(): Boolean {
+        pending.abandon()
+        if (!claimOutput()) return false
+        print(commandName, failure(ExitCode.INTERRUPTED, "interrupted", CliBundle.message("error.interrupted")), jsonMode)
+        environment.out.flush()
+        environment.err.flush()
+        return true
+    }
+
+    /** The first to ask gets to print the result; the other must stay silent, or standard output would hold two documents. */
+    private fun claimOutput(): Boolean = synchronized(outputLock) {
+        if (outputClaimed) false else true.also { outputClaimed = true }
     }
 
     private fun dispatch(context: CommandContext): CommandResult = when (context.line.command) {
@@ -60,6 +112,8 @@ internal class SessionPorterCli(private val environment: CliEnvironment) {
 
     private fun failure(exitCode: Int, code: String, message: String, data: Map<String, Any?>? = null) =
         CommandResult(data, emptyList(), exitCode = exitCode, error = CliError(code, message))
+
+    private fun ioFailure(detail: String) = failure(ExitCode.ENVIRONMENT, "ioError", CliBundle.message("error.io", detail))
 
     // ----------------------------------------------------------------------------------- output --
 

@@ -14,6 +14,7 @@ import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.io.StringReader
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -57,7 +58,10 @@ abstract class CliTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
-    protected val root: Path get() = tmp.root.toPath()
+    protected val root: Path get() = tmp.root.toPath().toRealPath()
+
+    /** The "system temp folder" of the runs: below the test folder, so that a leftover of a run can be looked for. */
+    protected val systemTemp: Path get() = Files.createDirectories(root.resolve("system-temp"))
 
     /** The "now" of every run: Tuesday 12 March 2024, 08:30:15 UTC. */
     protected val fixedClock: Clock = Clock.fixed(Instant.parse("2024-03-12T08:30:15Z"), ZoneOffset.UTC)
@@ -83,23 +87,44 @@ abstract class CliTest {
         stdin: String = "",
         windows: Boolean = false,
         environment: Map<String, String> = emptyMap(),
+        interactiveInput: Boolean = false,
+    ): CliResult = run(*args, windows = windows, environment = environment::get, stdin = stdin, interactiveInput = interactiveInput)
+
+    /** The same, with the environment variables given as a function, so that a test can make reading one fail. */
+    protected fun run(
+        vararg args: String,
+        windows: Boolean = false,
+        environment: (String) -> String?,
+        stdin: String = "",
+        interactiveInput: Boolean = false,
     ): CliResult {
         val out = ByteArrayOutputStream()
         val err = ByteArrayOutputStream()
-        val cliEnvironment = CliEnvironment(
-            input = ByteArrayInputStream(stdin.toByteArray(StandardCharsets.UTF_8)),
-            out = CliEnvironment.utf8(out),
-            err = CliEnvironment.utf8(err),
-            osName = if (windows) "Windows 11" else "Linux",
-            userHome = runnerHome.toString(),
-            getenv = environment::get,
-            clock = fixedClock,
-        )
+        val cliEnvironment = environmentOf(out, err, windows, environment, stdin, interactiveInput)
         val exitCode = SessionPorterCli(cliEnvironment).run(args.toList())
         cliEnvironment.out.flush()
         cliEnvironment.err.flush()
         return CliResult(exitCode, out.toByteArray(), err.toByteArray())
     }
+
+    internal fun environmentOf(
+        out: OutputStream,
+        err: OutputStream,
+        windows: Boolean = false,
+        getenv: (String) -> String? = { null },
+        stdin: String = "",
+        interactiveInput: Boolean = false,
+    ) = CliEnvironment(
+        input = ByteArrayInputStream(stdin.toByteArray(StandardCharsets.UTF_8)),
+        out = CliEnvironment.utf8(out),
+        err = CliEnvironment.utf8(err),
+        osName = if (windows) "Windows 11" else "Linux",
+        userHome = runnerHome.toString(),
+        getenv = getenv,
+        clock = fixedClock,
+        tempDirectory = systemTemp,
+        inputIsInteractive = interactiveInput,
+    )
 
     // ----------------------------------------------------------------------------------- fixtures --
 

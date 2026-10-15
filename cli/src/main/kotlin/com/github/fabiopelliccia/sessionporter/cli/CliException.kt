@@ -9,6 +9,9 @@ internal object ExitCode {
     const val PARTIAL = 5
     const val PRIVACY = 6
     const val INTERNAL = 10
+
+    /** The command was stopped (Ctrl+C, SIGTERM): the number a shell gives to a process ended by SIGINT. */
+    const val INTERRUPTED = 130
 }
 
 /**

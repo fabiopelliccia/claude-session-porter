@@ -146,4 +146,16 @@ internal object ArgumentParser {
         }
         throw usageError("noCommand", "error.usage.noCommand")
     }
+
+    /**
+     * The command [args] name, for the report of a command line that did not parse: `null` when there is none or
+     * it is not one of ours. It reads like [indexOfCommand] but never fails.
+     */
+    fun commandWord(args: List<String>): String? {
+        return try {
+            args[indexOfCommand(args)].takeIf { CommandSpecs.find(it) != null }
+        } catch (_: CliException) {
+            null
+        }
+    }
 }

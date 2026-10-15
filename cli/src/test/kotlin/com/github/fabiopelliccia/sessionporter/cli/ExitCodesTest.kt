@@ -73,7 +73,7 @@ class ExitCodesTest : CliTest() {
     fun `exit 3 for an archive from a newer format`() {
         val tooNew = writeZip(root.resolve("new.zip"), manifestJson("s-1", formatVersion = 99), mapOf("sessions/s-1/transcript.jsonl" to "{}\n"))
         val result = import(tooNew, claudeHomeOf("bob"))
-        assertFailure(result, ExitCode.ARCHIVE, "invalidArchive")
+        assertFailure(result, ExitCode.ARCHIVE, "archiveTooNew")
         assertTrue(result.json().getAsJsonObject("error").get("message").asString.contains("99"))
     }
 
