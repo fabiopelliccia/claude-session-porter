@@ -187,8 +187,17 @@ object SessionArchive {
      *
      * [targetProjectPath] attaches the sessions to a folder of this machine: the recorded `cwd`
      * and project folder name come from the source machine (or user) and are meaningless anywhere
-     * else. When it is `null` each session keeps the folder it was recorded in. [conflictPolicy]
-     * decides what happens to a session whose id already exists anywhere under `projects/`.
+     * else. When it is `null` each session of a format 1 archive keeps the folder it was recorded
+     * in; a format 2 archive does not know that folder at all (it holds tokens, see
+     * [PathAnonymizer]) and **requires** a target: without one the import is refused with
+     * `error.targetRequired`, an [IllegalArgumentException]. [conflictPolicy] decides what happens to
+     * a session whose id already exists anywhere under `projects/`.
+     *
+     * A format 2 archive is rendered for this machine: the tokens standing for the source project
+     * become [targetProjectPath], those for the source home become [userHome] and those for its Claude
+     * home become [home], each in the spelling the token records (see [PathDeanonymizer]), in every
+     * transcript, text file and entry name. [userHome] is the account's home folder, spelled the way
+     * paths of the target are (it is `user.home` unless a test or a tool stands in for another account).
      *
      * With [shiftTimestampsToNow] every timestamp of a session moves by one delta, so its last
      * message lands at import time while the spacing between messages is preserved. Every step is
@@ -205,6 +214,7 @@ object SessionArchive {
         progress: TransferProgress = TransferProgress.NOOP,
         log: ImportLog = ImportLog.NOOP,
         environment: ImportEnvironment = ImportEnvironment(),
+        userHome: String = System.getProperty("user.home"),
     ): ImportOutcome {
         val startedAt = System.currentTimeMillis()
         val importedAt = Instant.now()
@@ -215,6 +225,10 @@ object SessionArchive {
         val manifest = readArchiveManifest(archive)
         val selected = manifest.sessions.filter { sessionIds == null || it.id in sessionIds }
         logManifest(log, manifest, selected)
+        if (manifest.isAnonymized && attachedFolder == null) {
+            throw IllegalArgumentException(ClaudeSessionsBundle.message("error.targetRequired"))
+        }
+        val tokens = attachedFolder?.let { tokensOf(manifest, it, userHome, home) }
 
         val existing = SessionScanner.existingTranscripts(home).toMutableMap()
         val nativeTranscript = attachedFolder?.let { latestTranscript(ClaudePaths.projectsDir(home).resolve(ClaudePaths.encodeProjectPath(it))) }
@@ -234,7 +248,7 @@ object SessionArchive {
                 )
                 val sessionLog = log.child("Session ${session.id}")
                 try {
-                    val context = SingleImport(zip, session, conflictPolicy, attachedFolder, shiftTimestampsToNow, importedAt, home, existing)
+                    val context = SingleImport(zip, session, conflictPolicy, attachedFolder, shiftTimestampsToNow, importedAt, home, existing, tokens)
                     when (val result = importSingle(context, sessionLog, warnings)) {
                         null -> skipped += session.id
                         else -> {
@@ -242,7 +256,8 @@ object SessionArchive {
                             existing[result.writtenId] = listOf(
                                 ClaudePaths.projectsDir(home).resolve(result.projectFolderName).resolve("${result.writtenId}.jsonl"),
                             )
-                            targets += ImportDiagnostics.Target(result, session.projectPath, attachedFolder, shiftTimestampsToNow)
+                            // A format 2 archive has no source folder left to look for: its leftovers are tokens (check 14).
+                            targets += ImportDiagnostics.Target(result, session.projectPath.takeIf { tokens == null }, attachedFolder, shiftTimestampsToNow, tokens?.prefix)
                         }
                     }
                 } catch (e: Exception) {
@@ -269,6 +284,8 @@ object SessionArchive {
         val importedAt: Instant,
         val home: Path,
         val existing: Map<String, List<Path>>,
+        /** How the tokens of a format 2 archive are rendered here; `null` for format 1. */
+        val tokens: TokenRendering?,
     )
 
     /** Imports one session; returns `null` when it is skipped. */
@@ -319,7 +336,8 @@ object SessionArchive {
             }
         }
 
-        val mapper = context.attachedFolder?.let { PathMapper(session.projectPath, it) }
+        val tokens = context.tokens
+        val mapper = tokens?.mapper ?: context.attachedFolder?.let { PathMapper(session.projectPath, it) }
         val delta = if (context.shift) {
             TimestampShift.deltaToNow(session.lastTimestamp ?: session.firstTimestamp, context.importedAt)
         } else {
@@ -332,28 +350,47 @@ object SessionArchive {
         val targetFile = targetDir.resolve("$writtenId.jsonl")
         val rewriter = TranscriptRewriter(session.id, writtenId.takeIf { it != session.id }, mapper, delta)
         val stats = TranscriptRewriter.Stats()
-        if (rewriter.isIdentity) {
+        val rendered = PathDeanonymizer.Stats()
+        if (tokens != null) {
+            // Two passes, in this order: the fields Claude Code reads are mapped structurally (the tokens
+            // of the source project become the target folder), then every remaining token of every
+            // string and key is rendered for this machine. Never the byte copy, whatever else is identity.
+            val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
+            val structural = rewriter.rewrite(text, stats)
+            Files.write(targetFile, tokens.deanonymizer.deanonymizeJsonl(structural, rendered).toByteArray(StandardCharsets.UTF_8))
+        } else if (rewriter.isIdentity) {
             zip.getInputStream(transcriptEntry).use { Files.copy(it, targetFile, StandardCopyOption.REPLACE_EXISTING) }
             log.line("transcript copied byte for byte")
         } else {
             val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
             Files.write(targetFile, rewriter.rewrite(text, stats).toByteArray(StandardCharsets.UTF_8))
+        }
+        if (!rewriter.isIdentity) {
             log.kv("transcript.lines", stats.lines)
             log.kv("transcript.rewrittenLines", stats.rewrittenLines)
             log.kv("transcript.unparsableLines", stats.unparsableLines)
             for ((field, count) in stats.changes) log.kv("transcript.changed.$field", count)
         }
+        if (tokens != null) logRendered(log, "transcript", rendered)
 
         // A subagent run under the auxiliary folder is a transcript of its own, recorded on the same
         // machine with the same `cwd`, `sessionId` and timestamps: it gets the same rewrite as the
-        // main transcript, or the source user's paths would survive there. Other files are copied as-is.
+        // main transcript, or the source user's paths would survive there. Other files are copied as-is,
+        // except in a format 2 archive, where every text file (and every entry name) has its tokens rendered.
         val auxStats = TranscriptRewriter.Stats()
-        val aux = extractEntries(zip, auxPrefix(session.id), targetDir.resolve(writtenId), rewriter.takeIf { !it.isIdentity }, auxStats)
+        val auxRendered = PathDeanonymizer.Stats()
+        val aux = extractEntries(zip, auxPrefix(session.id), targetDir.resolve(writtenId), rewriter.takeIf { !it.isIdentity }, auxStats, tokens?.deanonymizer, auxRendered)
         log.kv("aux.filesWritten", aux.written)
         log.kv("aux.rewrittenTranscripts", aux.rewritten)
         for ((field, count) in auxStats.changes) log.kv("aux.changed.$field", count)
-        val fileHistory = extractEntries(zip, fileHistoryPrefix(session.id), ClaudePaths.fileHistoryDir(context.home).resolve(writtenId))
+        if (tokens != null) logRendered(log, "aux", auxRendered)
+        val historyRendered = PathDeanonymizer.Stats()
+        val fileHistory = extractEntries(
+            zip, fileHistoryPrefix(session.id), ClaudePaths.fileHistoryDir(context.home).resolve(writtenId),
+            deanonymizer = tokens?.deanonymizer, rendered = historyRendered,
+        )
         log.kv("fileHistory.filesWritten", fileHistory.written)
+        if (tokens != null) logRendered(log, "fileHistory", historyRendered)
         val discarded = aux.discarded + fileHistory.discarded
         if (discarded.isNotEmpty()) log.kv("discardedZipSlipEntries", discarded)
 
@@ -405,6 +442,11 @@ object SessionArchive {
     /**
      * Extracts every entry below [prefix] into [targetDir]. With a [rewriter], `.jsonl` entries are
      * transcripts and go through it; every other entry is copied byte for byte.
+     *
+     * With a [deanonymizer] (a format 2 archive) the tokens of the entry name are rendered first, so a
+     * file called after a folder gets this machine's name; a transcript is then also rendered for
+     * this machine ([PathDeanonymizer.deanonymizeJsonl], after the structural [rewriter]), any other
+     * UTF-8 text file with [PathDeanonymizer.deanonymizeText], and a binary file is still copied as it is.
      */
     private fun extractEntries(
         zip: ZipFile,
@@ -412,6 +454,8 @@ object SessionArchive {
         targetDir: Path,
         rewriter: TranscriptRewriter? = null,
         stats: TranscriptRewriter.Stats = TranscriptRewriter.Stats(),
+        deanonymizer: PathDeanonymizer? = null,
+        rendered: PathDeanonymizer.Stats = PathDeanonymizer.Stats(),
     ): Extraction {
         var written = 0
         var rewritten = 0
@@ -420,22 +464,69 @@ object SessionArchive {
         while (entries.hasMoreElements()) {
             val entry = entries.nextElement()
             if (entry.isDirectory || !entry.name.startsWith(prefix)) continue
-            val target = resolveSafely(targetDir, entry.name.removePrefix(prefix))
+            val relative = entry.name.removePrefix(prefix)
+            val target = runCatching { resolveSafely(targetDir, deanonymizer?.deanonymizeText(relative, rendered) ?: relative) }.getOrNull()
             if (target == null) {
                 discarded += entry.name
                 continue
             }
             Files.createDirectories(target.parent)
-            if (rewriter != null && entry.name.endsWith(".jsonl", ignoreCase = true)) {
+            val isTranscript = rewriter != null && entry.name.endsWith(".jsonl", ignoreCase = true)
+            if (isTranscript) {
                 val text = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
-                Files.write(target, rewriter.rewrite(text, stats).toByteArray(StandardCharsets.UTF_8))
+                val structural = rewriter!!.rewrite(text, stats)
+                val final = deanonymizer?.deanonymizeJsonl(structural, rendered) ?: structural
+                Files.write(target, final.toByteArray(StandardCharsets.UTF_8))
                 rewritten++
+            } else if (deanonymizer != null) {
+                val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                val text = decodeUtf8Text(bytes)
+                val final = text?.let { deanonymizer.deanonymizeText(it, rendered) }
+                Files.write(target, if (final == null || final == text) bytes else final.toByteArray(StandardCharsets.UTF_8))
             } else {
                 zip.getInputStream(entry).use { input -> Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING) }
             }
             written++
         }
         return Extraction(written, discarded, rewritten)
+    }
+
+    /** What the import of a format 2 archive renders its tokens with, built once per import. */
+    private class TokenRendering(
+        val prefix: String,
+        val deanonymizer: PathDeanonymizer,
+        /** Maps the structural fields: the `ROOT` tokens are the source roots, the home ones extra file anchors. */
+        val mapper: PathMapper,
+    )
+
+    /** The rendering of [manifest]'s tokens for [target], or `null` for a format 1 archive. */
+    private fun tokensOf(manifest: ArchiveManifest, target: String, userHome: String, claudeHome: Path): TokenRendering? {
+        val info = manifest.anonymization?.takeIf { manifest.isAnonymized } ?: return null
+        val prefix = info.tokenPrefix
+        val destinationHome = ClaudePaths.normalizeProjectPath(userHome)
+        val destinationClaudeHome = ClaudePaths.normalizeProjectPath(claudeHome.toAbsolutePath().toString())
+        val deanonymizer = PathDeanonymizer(
+            root = target,
+            home = destinationHome,
+            claudeHome = destinationClaudeHome,
+            os = PathOs.of(target),
+            tokenPrefix = prefix,
+            sourceOs = info.os,
+        )
+        val roots = PathStyle.entries.map { PathTokens.render(PathKind.ROOT, it, prefix) }
+        val anchors = linkedMapOf<String, String>()
+        for (style in PathStyle.entries) {
+            anchors[PathTokens.render(PathKind.HOME, style, prefix)] = destinationHome
+            anchors[PathTokens.render(PathKind.CLAUDE_HOME, style, prefix)] = destinationClaudeHome
+        }
+        return TokenRendering(prefix, deanonymizer, PathMapper(roots, target, anchors))
+    }
+
+    private fun logRendered(log: ImportLog, name: String, stats: PathDeanonymizer.Stats) {
+        log.kv("$name.tokensRendered", stats.totalRendered)
+        for ((kind, count) in stats.renderedByKind) log.kv("$name.rendered.$kind", count)
+        if (stats.unresolvedTokens > 0) log.kv("$name.unresolvedTokens", stats.unresolvedTokens)
+        if (stats.keyCollisions > 0) log.kv("$name.keyCollisions", stats.keyCollisions)
     }
 
     /** Guards against zip-slip: refuses any entry whose resolved path escapes [base]. */
@@ -495,6 +586,7 @@ object SessionArchive {
         log.kv("manifest.exportedAt", manifest.exportedAt)
         log.kv("manifest.producer", manifest.producer)
         log.kv("manifest.sourceHome", manifest.sourceHome)
+        log.kv("manifest.anonymization", manifest.anonymization)
         log.kv("manifest.sessionCount", manifest.sessions.size)
         for (session in manifest.sessions) {
             log.line(

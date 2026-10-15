@@ -224,22 +224,9 @@ internal class SessionExporter(
     private fun prepareFile(file: Path, anonymizer: PathAnonymizer): Prepared {
         val stats = PathAnonymizer.Stats()
         val bytes = Files.readAllBytes(file)
-        val text = decodeText(bytes) ?: return Prepared(bytes, stats, binaryHits = anonymizer.scanBytes(bytes))
+        val text = decodeUtf8Text(bytes) ?: return Prepared(bytes, stats, binaryHits = anonymizer.scanBytes(bytes))
         val anonymized = anonymizer.anonymizeText(text, stats)
         return Prepared(if (anonymized == text) bytes else anonymized.toByteArray(StandardCharsets.UTF_8), stats)
-    }
-
-    /** [bytes] as UTF-8 text, or `null` when they are not (invalid UTF-8 or a NUL: a binary file). */
-    private fun decodeText(bytes: ByteArray): String? {
-        val text = try {
-            StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(bytes)).toString()
-        } catch (e: CharacterCodingException) {
-            return null
-        }
-        return text.takeIf { '\u0000' !in it }
     }
 
     /**
@@ -332,8 +319,33 @@ internal class SessionExporter(
             val projectDir = projectsDir.resolve(session.projectFolderName)
             val sources = listOf(projectDir.resolve("${session.id}.jsonl")) +
                 filesUnder(projectDir.resolve(session.id)) + filesUnder(ClaudePaths.fileHistoryDir(home).resolve(session.id))
-            sources.any { fileContains(it, bytes) }
+            sources.any { fileContains(it, bytes) || decodedContains(it, needle) }
         }
+    }
+
+    /**
+     * Whether a `.jsonl` [file] holds [needle] once its lines are parsed: JSON can write the braces
+     * of `{{SP` as unicode escapes, which a scan of the bytes misses and which the import would then take for a
+     * token of its own. Only the strings and keys of the parsed lines count, as in the anonymizer.
+     */
+    private fun decodedContains(file: Path, needle: String): Boolean {
+        if (!file.fileName.toString().endsWith(".jsonl", ignoreCase = true) || !file.isRegularFile()) return false
+        val text = try {
+            Files.readString(file, StandardCharsets.UTF_8)
+        } catch (e: IOException) {
+            return false
+        }
+        if (!text.contains(UNICODE_ESCAPE)) return false // nothing is escaped: the byte scan has seen it all
+        var found = false
+        JsonLines.mapLines(text) { line ->
+            if (!found) {
+                JsonLines.parse(line)?.let { element ->
+                    JsonLines.mapStrings(element, { value -> if (needle in value) found = true; value }, {})
+                }
+            }
+            line
+        }
+        return found
     }
 
     private fun filesUnder(dir: Path): List<Path> {
@@ -379,5 +391,24 @@ internal class SessionExporter(
 
     private companion object {
         const val TRANSCRIPT_NAME = "transcript.jsonl"
+
+        /** A backslash and a `u`: how JSON starts a unicode escape. */
+        val UNICODE_ESCAPE = "\\" + "u"
     }
+}
+
+/**
+ * [bytes] as UTF-8 text, or `null` when they are not: invalid UTF-8 or a NUL mean a binary file, which
+ * the export only scans and the import copies as it is.
+ */
+internal fun decodeUtf8Text(bytes: ByteArray): String? {
+    val text = try {
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
+    } catch (e: CharacterCodingException) {
+        return null
+    }
+    return text.takeIf { '\u0000' !in it }
 }

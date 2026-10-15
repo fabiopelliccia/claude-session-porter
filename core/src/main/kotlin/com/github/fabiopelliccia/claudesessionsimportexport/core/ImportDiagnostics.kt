@@ -27,7 +27,7 @@ import kotlin.streams.asSequence
 class ImportDiagnostics(private val home: Path) {
 
     companion object {
-        const val CHECK_COUNT = 13
+        const val CHECK_COUNT = 14
 
         /** Tolerance for "the session ends at import time": the import itself takes a moment. */
         private val TIME_TOLERANCE: Duration = Duration.ofMinutes(1)
@@ -41,6 +41,8 @@ class ImportDiagnostics(private val home: Path) {
         /** Folder the session was attached to, already normalized; `null` when it kept its own. */
         val attachedFolder: String?,
         val timestampsShifted: Boolean,
+        /** Token prefix of a format 2 archive, whose tokens must all be gone (check 14); `null` for format 1. */
+        val tokenPrefix: String? = null,
     )
 
     data class Check(val number: Int, val ok: Boolean, val detail: String? = null) {
@@ -142,6 +144,9 @@ class ImportDiagnostics(private val home: Path) {
         val missingBackups = missingBackupFiles(objects, session.writtenId)
         checks += Check(13, missingBackups.isEmpty(), "missing = ${missingBackups.size}, e.g. ${missingBackups.firstOrNull()}".takeIf { missingBackups.isNotEmpty() })
 
+        val tokensLeft = target.tokenPrefix?.let { leftoverTokens(it, text, projectDir.resolve(session.writtenId), ClaudePaths.fileHistoryDir(home).resolve(session.writtenId)) }.orEmpty()
+        checks += Check(14, tokensLeft.isEmpty(), tokensLeft.takeIf { it.isNotEmpty() }?.let { "tokens left = ${it.values.sum()} in ${it.keys}" })
+
         return checks
     }
 
@@ -173,6 +178,29 @@ class ImportDiagnostics(private val home: Path) {
             }
             hits
         }
+    }
+
+    /**
+     * The anonymization tokens of [prefix] still in what was written for the session, by file: the
+     * transcript ([transcript], as read) and every UTF-8 text file below [auxDir] and [historyDir].
+     * Names only, never content. Empty when the import rendered all of them.
+     */
+    private fun leftoverTokens(prefix: String, transcript: String?, auxDir: Path, historyDir: Path): Map<String, Int> {
+        val found = linkedMapOf<String, Int>()
+        transcript?.let { PathTokens.count(it, prefix).takeIf { count -> count > 0 }?.let { count -> found["transcript"] = count } }
+        for ((label, dir) in listOf("aux" to auxDir, "fileHistory" to historyDir)) {
+            if (!dir.isDirectory()) continue
+            runCatching {
+                Files.walk(dir).use { paths ->
+                    paths.filter { it.isRegularFile() }.forEach { file ->
+                        val text = runCatching { decodeUtf8Text(Files.readAllBytes(file)) }.getOrNull() ?: return@forEach
+                        val count = PathTokens.count(text, prefix)
+                        if (count > 0) found["$label/${dir.relativize(file).toString().replace('\\', '/')}"] = count
+                    }
+                }
+            }
+        }
+        return found
     }
 
     /** Backup files the snapshots refer to that are not in `<home>/file-history/<id>/`. */

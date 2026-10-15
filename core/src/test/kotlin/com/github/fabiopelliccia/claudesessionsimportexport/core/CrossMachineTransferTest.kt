@@ -133,6 +133,12 @@ class CrossMachineTransferTest {
         val src = "$root${sep}src"
         val mainFile = "$src${sep}Main.kt"
         val tempDir = if (sep == "\\") "C:\\Users\\$user\\AppData\\Local\\Temp" else "/tmp/claude-$user"
+        // A file of the user's own home the user names in the conversation, in the way of the account's OS.
+        val typedPath = when {
+            sep == "\\" -> "C:\\Users\\$user\\note.txt"
+            root.startsWith("/Users/") -> "/Users/$user/note.txt"
+            else -> "/home/$user/note.txt"
+        }
         // Claude Code always writes milliseconds, `2024-03-10T09:00:00.000Z`.
         fun ts(seconds: Long) = MILLIS.format(start.plusSeconds(seconds))
         val common = mapOf("sessionId" to id, "version" to "2.1.275", "gitBranch" to "develop", "userType" to "external")
@@ -190,7 +196,7 @@ class CrossMachineTransferTest {
             common + mapOf(
                 "parentUuid" to "$id-a1", "isSidechain" to false, "type" to "user", "uuid" to "$id-u2", "cwd" to root, "timestamp" to ts(10),
                 // The user typed a path of their own machine: conversation content, kept verbatim.
-                "message" to mapOf("role" to "user", "content" to "Leggi anche C:\\Users\\$user\\note.txt"),
+                "message" to mapOf("role" to "user", "content" to "Leggi anche $typedPath"),
             ),
             if (forms) {
                 common + mapOf(
@@ -279,31 +285,24 @@ class CrossMachineTransferTest {
     }
 
     /**
-     * Every spot of [home] that still contains [needle] (case-insensitive) *outside* the
-     * conversation. The conversation is a line's `message` and `toolUseResult`, and the tool results
-     * kept in the auxiliary folder: the plugin never rewrites what the user and Claude said.
+     * Every file of [home] - by name or by content - that still contains [needle] (case-insensitive).
+     * The conversation is no exception: the export anonymizes it too, so nothing of the other
+     * machine's user is left anywhere, not even where the user and Claude talked about a path.
      */
-    private fun tracesOutsideConversation(home: Path, needle: String): List<String> {
+    private fun traces(home: Path, needle: String): List<String> {
         val found = ArrayList<String>()
         Files.walk(home).use { paths ->
             paths.filter { it.isRegularFile() }.forEach { file ->
                 val relative = home.relativize(file).toString()
-                if (relative.replace('\\', '/').contains("/tool-results/")) return@forEach
-                val text = Files.readString(file)
-                if (file.name.endsWith(".jsonl")) {
-                    text.lines().forEachIndexed { index, line ->
-                        if (line.isBlank()) return@forEachIndexed
-                        val obj = JsonParser.parseString(line).asJsonObject
-                        obj.remove("message")
-                        obj.remove("toolUseResult")
-                        if (obj.toString().contains(needle, ignoreCase = true)) found += "$relative:${index + 1}"
-                    }
-                } else if (text.contains(needle, ignoreCase = true)) {
-                    found += relative
-                }
+                if (relative.contains(needle, ignoreCase = true) || Files.readString(file).contains(needle, ignoreCase = true)) found += relative
             }
         }
         return found
+    }
+
+    /** No anonymization token is left anywhere under [home], whatever the prefix. */
+    private fun assertNoTokens(home: Path) {
+        assertEquals(emptyList<String>(), traces(home, "{{SP"))
     }
 
     private fun assertRecent(instant: Instant, message: String) =
@@ -365,8 +364,7 @@ class CrossMachineTransferTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
-    fun `nothing on PC_2 names alice or her account outside the conversation`() {
+    fun `nothing on PC_2 names alice or her account, the conversation included`() {
         val pc1 = Pc("PC_1", "alice")
         val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
         val archive = tmp.root.toPath().resolve("export.zip")
@@ -374,19 +372,16 @@ class CrossMachineTransferTest {
 
         val pc2 = Pc("PC_2", "bob")
         val bobDemo = pc2.projectFolder("lavoro", "demo")
-        SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo)
+        SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = pc2.root.toString())
 
-        assertEquals(emptyList<String>(), tracesOutsideConversation(pc2.home, "alice"))
-        // Her account email and git name are not even in the conversation: they must be gone entirely.
-        Files.walk(pc2.home).use { paths ->
-            paths.filter { it.isRegularFile() }.forEach { file ->
-                val text = Files.readString(file)
-                assertFalse("$file", text.contains(aliceEmail) || text.contains(aliceGitName))
-            }
-        }
-        // The conversation itself is exactly what alice and Claude said, her own path included.
+        assertEquals(emptyList<String>(), traces(pc2.home, "alice"))
+        assertNoTokens(pc2.home)
+        // Her account email and git name were never in the archive.
+        assertEquals(emptyList<String>(), traces(pc2.home, aliceEmail))
+        assertEquals(emptyList<String>(), traces(pc2.home, aliceGitName))
+        // The conversation is anonymized with the rest: the path alice typed is bob's home on PC_2.
         val text = Files.readString(transcriptOn(pc2, bobDemo, "s-1"))
-        assertTrue(text.contains("Leggi anche C:\\\\Users\\\\alice\\\\note.txt"))
+        assertTrue(text.contains("Leggi anche ${pc2.root.toString().replace("\\", "\\\\")}\\\\note.txt"))
         assertTrue(text.contains("\"Aggiungi un test\""))
     }
 
@@ -417,7 +412,6 @@ class CrossMachineTransferTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `a subagent run follows the main transcript to bob's folder, id and time`() {
         val pc1 = Pc("PC_1", "alice")
         val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
@@ -449,7 +443,7 @@ class CrossMachineTransferTest {
         // The subagent's metadata and the tool results are copied as they were.
         val aux = transcriptOn(pc2, bobDemo, "s-1").resolveSibling("s-1")
         assertEquals("""{"agentType":"Explore","description":"Explore the project"}""", Files.readString(aux.resolve("subagents/agent-a1.meta.json")))
-        assertEquals("Listing of $aliceRoot\n", Files.readString(aux.resolve("tool-results/toolu_1.txt")))
+        assertEquals("Listing of $canonical\n", Files.readString(aux.resolve("tool-results/toolu_1.txt")))
     }
 
     @Test
@@ -583,11 +577,12 @@ class CrossMachineTransferTest {
     fun `PC_1 and PC_2 on different operating systems`() {
         // Stand-in paths of the other operating system: they cannot exist on the machine running the
         // test, so check #8 ("the folder exists on this machine") is the only one left out here.
-        data class Case(val aliceHome: String, val aliceRoot: String, val bobRoot: String, val bobSrc: String)
+        // [typed] is the path alice typed in the conversation, as it reads on PC_2.
+        data class Case(val aliceHome: String, val aliceRoot: String, val bobHome: String, val bobRoot: String, val bobSrc: String, val typed: String)
         val cases = listOf(
-            Case("/home/alice", "/home/alice/dev/demo", "C:/Users/bob/lavoro/demo", "C:\\Users\\bob\\lavoro\\demo\\src"),
-            Case("C:\\Users\\alice", "C:\\Users\\alice\\progetti\\demo", "/Users/bob/lavoro/demo", "/Users/bob/lavoro/demo/src"),
-            Case("/Users/alice", "/Users/alice/dev/demo", "/home/bob/lavoro/demo/", "/home/bob/lavoro/demo/src"),
+            Case("/home/alice", "/home/alice/dev/demo", "C:\\Users\\bob", "C:/Users/bob/lavoro/demo", "C:\\Users\\bob\\lavoro\\demo\\src", "C:\\Users\\bob\\note.txt"),
+            Case("C:\\Users\\alice", "C:\\Users\\alice\\progetti\\demo", "/Users/bob", "/Users/bob/lavoro/demo", "/Users/bob/lavoro/demo/src", "/Users/bob/note.txt"),
+            Case("/Users/alice", "/Users/alice/dev/demo", "/home/bob", "/home/bob/lavoro/demo/", "/home/bob/lavoro/demo/src", "/home/bob/note.txt"),
         )
         cases.forEachIndexed { index, case ->
             val pc1 = Pc("PC_1-$index", "alice")
@@ -596,7 +591,7 @@ class CrossMachineTransferTest {
             exportFrom(pc1, listOf(session), archive, spelledHome = case.aliceHome)
 
             val pc2 = Pc("PC_2-$index", "bob")
-            val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = case.bobRoot)
+            val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = case.bobRoot, userHome = case.bobHome)
             assertEquals("$case", emptyList<Int>(), outcome.failedChecks.map { it.number }.filter { it != 8 })
 
             val canonical = ClaudePaths.normalizeProjectPath(case.bobRoot)
@@ -605,7 +600,11 @@ class CrossMachineTransferTest {
             assertEquals("$case", setOf(canonical, case.bobSrc), cwds)
             val sub = linesOf(subagentOn(pc2, canonical, "s-$index")).map { it.get("cwd").asString }.toSet()
             assertEquals("$case", setOf(canonical, case.bobSrc), sub)
-            assertEquals("$case", emptyList<String>(), tracesOutsideConversation(pc2.home, "alice"))
+            // The path alice typed is bob's home in bob's own spelling: separators included.
+            val typed = lines.map { it.getAsJsonObject("message")?.get("content") }.filter { it != null && it.isJsonPrimitive }.map { it!!.asString }
+            assertTrue("$case $typed", "Leggi anche ${case.typed}" in typed)
+            assertEquals("$case", emptyList<String>(), traces(pc2.home, "alice"))
+            assertNoTokens(pc2.home)
             assertEquals("$case", canonical, SessionScanner.listSessions(pc2.home).single().projectPath)
         }
     }
@@ -622,32 +621,35 @@ class CrossMachineTransferTest {
 
         val pc2 = Pc("PC_2", "Bob O'Brien")
         val bobRoot = pc2.projectFolder("Progetti Lavoro", "démo")
-        val outcome = SessionArchive.import(pc2.receive(archive, "sessions de Zoë.zip"), home = pc2.home, targetProjectPath = bobRoot)
+        val outcome = SessionArchive.import(pc2.receive(archive, "sessions de Zoë.zip"), home = pc2.home, targetProjectPath = bobRoot, userHome = pc2.root.toString())
 
         assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
         val listed = SessionScanner.listSessions(pc2.home).single()
         assertEquals(ClaudePaths.normalizeProjectPath(bobRoot), listed.projectPath)
         assertEquals("Ajoute un test", listed.displayName)
-        assertEquals(emptyList<String>(), tracesOutsideConversation(pc2.home, "Müller"))
+        assertEquals(emptyList<String>(), traces(pc2.home, "Müller"))
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
-    fun `without attaching, the session keeps alice's folder and the diagnosis says why it will not show`() {
+    fun `a format 2 archive cannot be imported without a target folder`() {
         val pc1 = Pc("PC_1", "alice")
         val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
         val archive = tmp.root.toPath().resolve("export.zip")
         exportFrom(pc1, listOf(session), archive)
 
         val pc2 = Pc("PC_2", "bob")
-        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = null)
-
-        // Stored under alice's folder name: only `claude --resume` started from "C:\Users\alice\..."
-        // would list it, and that folder does not exist on PC_2 - which is exactly what #8 reports.
-        assertEquals(listOf(8), outcome.failedChecks.map { it.number })
-        val listed = SessionScanner.listSessions(pc2.home).single()
-        assertEquals(ClaudePaths.encodeProjectPath(aliceRoot), listed.projectFolderName)
-        assertEquals(aliceRoot, listed.projectPath)
+        val received = pc2.receive(archive, "a.zip")
+        for (target in listOf(null, "", "   ")) {
+            val failure = try {
+                SessionArchive.import(received, home = pc2.home, targetProjectPath = target)
+                null
+            } catch (e: IllegalArgumentException) {
+                e
+            }
+            assertEquals("target $target", ClaudeSessionsBundle.message("error.targetRequired"), failure?.message)
+        }
+        // Nothing was written: the refusal comes before the first session.
+        assertFalse(Files.exists(pc2.home.resolve("projects")))
     }
 
     @Test
@@ -694,7 +696,7 @@ class CrossMachineTransferTest {
         assertEquals(listOf(8), back.failedChecks.map { it.number }.distinct()) // alice's folder is a stand-in path
         val lines = linesOf(transcriptOn(pc1, aliceRoot, copy.writtenId))
         assertEquals(setOf(aliceRoot, "$aliceRoot\\src"), lines.mapNotNull { it.get("cwd")?.asString }.toSet())
-        assertEquals(emptyList<String>(), tracesOutsideConversation(pc1.home, "bob"))
+        assertEquals(emptyList<String>(), traces(pc1.home, "bob"))
         assertEquals(setOf("s-1", copy.writtenId), SessionScanner.listSessions(pc1.home).map { it.id }.toSet())
     }
 
@@ -977,5 +979,299 @@ class CrossMachineTransferTest {
 
         assertTrue(textOf(archive, "sessions/s-1/transcript.jsonl").contains("{{SP:ROOT:fwd}}"))
         assertEquals(0, outcome.residualUserNameHits)
+    }
+
+    // ------------------------------------------------------------------ anonymized import (format 2) --
+
+    /** bob's home spelled in each of the forms [homeForms] plants, in the same order, as PC_2 renders them. */
+    private fun bobForms(home: String): List<String> {
+        val forward = home.replace('\\', '/')
+        val drive = home[0].lowercaseChar()
+        val folders = home.substring(3).replace('\\', '/')
+        fun escaped(times: Int) = home.replace("\\", "\\".repeat(times))
+        return listOf(
+            "$home\\docs\\a.txt",
+            "$forward/docs/a.txt",
+            "${escaped(2)}\\\\docs\\\\a.txt",
+            "${escaped(4)}\\\\\\\\docs\\\\\\\\a.txt",
+            "/$drive/$folders/docs/a.txt",
+            "/mnt/$drive/$folders/docs/a.txt",
+            "$home\\AppData\\Local\\Temp\\x.txt",
+            "${ClaudePaths.encodeProjectPath(home)}-docs-a-txt",
+            "file:///$forward/docs/a.txt",
+        )
+    }
+
+    @Test
+    fun `every spelling of alice's home comes back as bob's home, everywhere it was planted`() {
+        val pc1 = Pc("PC_1", "alice")
+        val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test", forms = true)
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(session), archive)
+
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val home = pc2.root.toString()
+        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = home)
+
+        // Every check, #14 included: nothing failed and no token was left.
+        assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
+        assertEquals(emptyList<ImportFailure>(), outcome.failures)
+        assertNoTokens(pc2.home)
+        val formsText = bobForms(home).joinToString(" | ")
+        val escapedHome = home.replace("\\", "\\\\")
+
+        val lines = linesOf(transcriptOn(pc2, bobDemo, "s-1"))
+        fun message(prefix: String) = lines.mapNotNull { it.getAsJsonObject("message")?.get("content") }
+            .filter { it.isJsonPrimitive }.map { it.asString }.single { it.startsWith(prefix) }
+        assertEquals("Forme: $formsText", message("Forme: "))
+        val result = lines.mapNotNull { it.getAsJsonObject("toolUseResult") }.single { it.has("stdout") }
+        assertEquals(formsText, result.get("stdout").asString)
+        val rendered = lines.mapNotNull { it.getAsJsonArray("rendered") }.single { it.size() == 2 }[1].asJsonObject.get("content").asString
+        assertEquals("<system-reminder>\nCartella: $formsText\n</system-reminder>", rendered)
+        val edited = lines.mapNotNull { it.getAsJsonObject("attachment") }.single { it.get("type").asString == "edited_text_file" }
+        assertEquals("$home\\docs\\a.txt", edited.get("filename").asString)
+        assertEquals("1\t$formsText", edited.get("snippet").asString)
+        // A key that is a path is renamed like a value.
+        val tracked = lines.single { it.get("type").asString == "file-history-snapshot" }.getAsJsonObject("snapshot").getAsJsonObject("trackedFileBackups")
+        assertTrue(tracked.has("$home\\docs\\a.txt"))
+        assertEquals("$home\\docs", tracked.getAsJsonObject("$home\\docs\\a.txt").get("realParentDir").asString)
+
+        // The auxiliary folder: text files, the JSON metadata (one escaping level down) and the subagent run.
+        val aux = transcriptOn(pc2, bobDemo, "s-1").resolveSibling("s-1")
+        assertEquals("$formsText\n", Files.readString(aux.resolve("tool-results/toolu_2.txt")))
+        assertEquals("""{"path":"$escapedHome\\docs\\a.txt","tool":"Read"}""", Files.readString(aux.resolve("tool-results/toolu_2.meta.json")))
+        val subagent = Files.readAllLines(subagentOn(pc2, bobDemo, "s-1"))
+        val msys = "/${home[0].lowercaseChar()}/${home.substring(3).replace('\\', '/')}"
+        assertEquals(
+            """{"type":"user","text":"$escapedHome\\docs\\a.txt and ${escapedHome.replace("\\", "\\\\")}\\\\docs and $msys/docs""",
+            subagent.last(),
+        )
+        val formsLine = JsonParser.parseString(subagent[subagent.size - 2]).asJsonObject
+        assertEquals("Forme: $formsText", formsLine.getAsJsonObject("message").getAsJsonArray("content")[0].asJsonObject.get("text").asString)
+        val history = pc2.home.resolve("file-history").resolve("s-1")
+        assertEquals("// $formsText\n", Files.readString(history.resolve("main@v3")))
+        assertEquals("// copia di $home\\docs\\a.txt\n", Files.readString(history.resolve("docs@v1")))
+
+        // What stays is what was never a path: the bare name, in a sentence and in a branch.
+        assertEquals(listOf("projects/${ClaudePaths.encodeProjectPath(bobDemo)}/s-1.jsonl"), traces(pc2.home, "alice").map { it.replace('\\', '/') })
+    }
+
+    @Test
+    fun `an archive entry named after alice's home is written under bob's name, a name a Windows file system accepts`() {
+        val pc1 = Pc("PC_1", "alice")
+        val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        Files.writeString(projectDirOf(pc1, aliceRoot).resolve("s-1").resolve("tool-results").resolve("C--Users-alice-notes.txt"), "uno\n")
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(session), archive)
+        // In the archive the name holds a token, and a colon: it is never used as a file name as it is.
+        assertTrue(entriesOf(archive).keys.contains("sessions/s-1/aux/tool-results/{{SP:HOME:enc}}-notes.txt"))
+
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val home = pc2.root.toString()
+        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = home)
+        assertEquals(emptyList<ImportFailure>(), outcome.failures)
+
+        val results = transcriptOn(pc2, bobDemo, "s-1").resolveSibling("s-1").resolve("tool-results")
+        assertEquals("uno\n", Files.readString(results.resolve("${ClaudePaths.encodeProjectPath(home)}-notes.txt")))
+        Files.walk(pc2.home).use { paths -> paths.forEach { assertFalse("$it", it.name.contains(":") || it.name.contains("{")) } }
+    }
+
+    @Test
+    fun `a format 1 archive of an earlier version still imports, kept in its own folder or attached`() {
+        val fixture = tmp.root.toPath().resolve("format1-alice.zip")
+        javaClass.getResourceAsStream("/fixtures/format1-alice.zip").use { Files.copy(it!!, fixture) }
+        val manifest = SessionArchive.readArchiveManifest(fixture)
+        assertEquals(1, manifest.formatVersion)
+        assertFalse(manifest.isAnonymized)
+        assertEquals(aliceRoot, manifest.sessions.single().projectPath)
+
+        // "Keep the original folder": alice's own folder name, which PC_2 does not have (#8 only).
+        val kept = Pc("PC_2", "bob")
+        val keptOutcome = SessionArchive.import(kept.receive(fixture, "a.zip"), home = kept.home, targetProjectPath = null)
+        assertEquals(listOf(8), keptOutcome.failedChecks.map { it.number })
+        val listed = SessionScanner.listSessions(kept.home).single()
+        assertEquals(ClaudePaths.encodeProjectPath(aliceRoot), listed.projectFolderName)
+        assertEquals(aliceRoot, listed.projectPath)
+        // Format 1 is never anonymized on the way in: the conversation is what it was.
+        assertTrue(Files.readString(transcriptOn(kept, aliceRoot, "s-v1")).contains("Leggi anche C:\\\\Users\\\\alice\\\\note.txt"))
+
+        // Attached to a folder of bob's: as before, with check 14 simply not applying.
+        val attached = Pc("PC_3", "bob")
+        val bobDemo = attached.projectFolder("lavoro", "demo")
+        val outcome = SessionArchive.import(attached.receive(fixture, "a.zip"), home = attached.home, targetProjectPath = bobDemo)
+        assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
+        val canonical = ClaudePaths.normalizeProjectPath(bobDemo)
+        assertEquals(setOf(canonical, "$canonical\\src"), linesOf(transcriptOn(attached, bobDemo, "s-v1")).mapNotNull { it.get("cwd")?.asString }.toSet())
+        val results = transcriptOn(attached, bobDemo, "s-v1").resolveSibling("s-v1").resolve("tool-results/toolu_1.txt")
+        assertEquals("Listing of $aliceRoot\n", Files.readString(results))
+    }
+
+    @Test
+    fun `check 14 reports a token that survived the import`() {
+        val pc1 = Pc("PC_1", "alice")
+        val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(session), archive)
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo)
+        val imported = outcome.imported.single()
+        val target = ImportDiagnostics.Target(imported, null, ClaudePaths.normalizeProjectPath(bobDemo), true, "SP")
+        val diagnostics = ImportDiagnostics(pc2.home)
+        assertTrue(diagnostics.runChecks(target, Instant.now()).single { it.number == 14 }.ok)
+
+        val results = transcriptOn(pc2, bobDemo, "s-1").resolveSibling("s-1").resolve("tool-results/toolu_1.txt")
+        Files.writeString(results, "left {{SP:HOME:win}}\\x\n")
+        val check = diagnostics.runChecks(target, Instant.now()).single { it.number == 14 }
+        assertFalse(check.ok)
+        assertTrue(check.detail, check.detail!!.contains("aux/tool-results/toolu_1.txt"))
+        // A format 1 target has no prefix: nothing to look for.
+        assertTrue(diagnostics.runChecks(target.copy(tokenPrefix = null), Instant.now()).single { it.number == 14 }.ok)
+        assertEquals(14, ImportDiagnostics.CHECK_COUNT)
+    }
+
+    @Test
+    fun `a token spelled with unicode escapes in a transcript is found, so the prefix is a nonce`() {
+        val pc1 = Pc("PC_1", "alice")
+        writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        val escape = "\\" + "u007b"
+        val transcript = transcriptOn(pc1, aliceRoot, "s-1")
+        val line = """{"type":"user","message":{"content":"${escape}${escape}SP:HOME:win}}"},"sessionId":"s-1"}"""
+        Files.writeString(transcript, Files.readString(transcript) + line + "\n")
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(SessionScanner.listSessions(pc1.home).single()), archive)
+        assertNotEquals("SP", SessionArchive.readArchiveManifest(archive).anonymization!!.tokenPrefix)
+    }
+
+    @Test
+    fun `a literal token of the source survives the round trip and is not rendered`() {
+        val pc1 = Pc("PC_1", "alice")
+        writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        // In a text file, in plain JSON, and with its braces written as unicode escapes in JSON, which a
+        // scan of the raw bytes does not see but the import would still read as a token.
+        val escape = "\\" + "u007b"
+        val transcript = transcriptOn(pc1, aliceRoot, "s-1")
+        val literal = """{"type":"user","message":{"content":"literal ${escape}${escape}SP:HOME:win}} and {{SP:ROOT:fwd}}"},"sessionId":"s-1"}"""
+        Files.writeString(transcript, Files.readString(transcript) + literal + "\n")
+        Files.writeString(pc1.home.resolve("file-history").resolve("s-1").resolve("main@v1"), "uses {{SP:HOME:win}} as a placeholder\n")
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(SessionScanner.listSessions(pc1.home).single()), archive)
+        val prefix = SessionArchive.readArchiveManifest(archive).anonymization!!.tokenPrefix
+        assertNotEquals("SP", prefix)
+
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = pc2.root.toString())
+        assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
+
+        val text = Files.readString(transcriptOn(pc2, bobDemo, "s-1"))
+        val content = linesOf(transcriptOn(pc2, bobDemo, "s-1")).last().getAsJsonObject("message").get("content").asString
+        assertEquals("literal {{SP:HOME:win}} and {{SP:ROOT:fwd}}", content)
+        assertFalse(text.contains("{{$prefix"))
+        assertEquals("uses {{SP:HOME:win}} as a placeholder\n", Files.readString(pc2.home.resolve("file-history/s-1/main@v1")))
+    }
+
+    @Test
+    fun `a project outside the home, a relocated Claude home and a project that is the home all come back`() {
+        val pc1 = Pc("PC_1", "alice")
+        writePc1Session(pc1.home, "s-out", "D:\\lavoro\\demo", "Aggiungi un test")
+        val transcript = transcriptOn(pc1, "D:\\lavoro\\demo", "s-out")
+        val typed = gson.toJson(mapOf("type" to "user", "message" to mapOf("content" to "vedi D:\\claude-home\\projects\\x"), "sessionId" to "s-out"))
+        Files.writeString(transcript, Files.readString(transcript) + typed + "\n")
+        val outsideArchive = tmp.root.toPath().resolve("outside.zip")
+        val relocated = SourceIdentity(home = "C:\\Users\\alice", claudeHome = "D:\\claude-home")
+        SessionArchive.export(listOf(SessionScanner.listSessions(pc1.home).single()), outsideArchive, home = pc1.home, identity = relocated)
+        val atHome = writePc1Session(pc1.home, "s-home", "C:\\Users\\alice", "Aggiungi un test")
+        val homeArchive = tmp.root.toPath().resolve("home.zip")
+        exportFrom(pc1, listOf(atHome), homeArchive)
+
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val bobHome = pc2.root.toString()
+        val claudeHome = pc2.home.toAbsolutePath().toString()
+        val first = SessionArchive.import(pc2.receive(outsideArchive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = bobHome)
+        assertEquals(emptyList<FailedCheck>(), first.failedChecks)
+        val text = Files.readString(transcriptOn(pc2, bobDemo, "s-out"))
+        // The Claude home token becomes PC_2's Claude home, not bob's home.
+        assertTrue(text, text.contains("vedi ${claudeHome.replace("\\", "\\\\")}\\\\projects\\\\x"))
+        assertNoTokens(pc2.home)
+        assertEquals(emptyList<String>(), traces(pc2.home, "D:\\\\lavoro"))
+
+        // The project that was alice's home: bob's target replaces it.
+        val second = SessionArchive.import(pc2.receive(homeArchive, "b.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = bobHome)
+        assertEquals(emptyList<FailedCheck>(), second.failedChecks)
+        val canonical = ClaudePaths.normalizeProjectPath(bobDemo)
+        val cwds = linesOf(transcriptOn(pc2, bobDemo, "s-home")).mapNotNull { it.get("cwd")?.asString }.toSet()
+        assertEquals(setOf(canonical, "$canonical\\src"), cwds)
+        assertEquals(emptyList<String>(), traces(pc2.home, "alice"))
+    }
+
+    @Test
+    fun `alice2 and alice dot bak are not alice, on the way out and on the way back`() {
+        val pc1 = Pc("PC_1", "alice")
+        writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        val transcript = transcriptOn(pc1, aliceRoot, "s-1")
+        val message = "C:\\Users\\alice2\\x C:\\Users\\alice.bak\\y C:\\Users\\Alice\\z"
+        Files.writeString(transcript, Files.readString(transcript) + gson.toJson(mapOf("type" to "user", "message" to mapOf("content" to message), "sessionId" to "s-1")) + "\n")
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(SessionScanner.listSessions(pc1.home).single()), archive)
+
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+        val home = pc2.root.toString()
+        SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = home)
+        val content = linesOf(transcriptOn(pc2, bobDemo, "s-1")).last().getAsJsonObject("message").get("content").asString
+        assertEquals("C:\\Users\\alice2\\x C:\\Users\\alice.bak\\y $home\\z", content)
+    }
+
+    @Test
+    fun `a name with spaces and accents comes back in its encoded and percent forms`() {
+        val pc1 = Pc("PC_1", "Zoë Müller")
+        val zoeRoot = "C:\\Users\\Zoë Müller\\Mes Projets\\démo"
+        writePc1Session(pc1.home, "s-1", zoeRoot, "Ajoute un test", user = "Zoë Müller")
+        val transcript = transcriptOn(pc1, zoeRoot, "s-1")
+        val forms = "file:///C:/Users/Zo%C3%AB%20M%C3%BCller/x C--Users-Zo--M-ller-notes C:/Users/Zoë Müller/y"
+        Files.writeString(transcript, Files.readString(transcript) + gson.toJson(mapOf("type" to "user", "message" to mapOf("content" to forms), "sessionId" to "s-1")) + "\n")
+        val archive = tmp.root.toPath().resolve("export.zip")
+        exportFrom(pc1, listOf(SessionScanner.listSessions(pc1.home).single()), archive)
+        val leaks = entriesOf(archive).filter { (_, bytes) -> String(bytes, Charsets.UTF_8).let { "Zo%C3" in it || "Müller" in it || "M-ller" in it } }
+        assertEquals(emptyList<String>(), leaks.keys.toList())
+
+        val pc2 = Pc("PC_2", "Bob O'Brien")
+        val bobRoot = pc2.projectFolder("Progetti Lavoro", "démo")
+        val home = pc2.root.toString()
+        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobRoot, userHome = home)
+        assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
+        val content = linesOf(transcriptOn(pc2, bobRoot, "s-1")).last().getAsJsonObject("message").get("content").asString
+        assertTrue(content, content.contains("${ClaudePaths.encodeProjectPath(home)}-notes"))
+        assertTrue(content, content.contains("${home.replace('\\', '/')}/y"))
+        assertNoTokens(pc2.home)
+    }
+
+    @Test
+    fun `a transcript of 50 MB is exported and imported within a time bound`() {
+        val pc1 = Pc("PC_1", "alice")
+        writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test")
+        val transcript = transcriptOn(pc1, aliceRoot, "s-1")
+        val filler = "x".repeat(900)
+        val message = mapOf("content" to "C:\\Users\\alice\\docs $filler")
+        val line = gson.toJson(mapOf("type" to "user", "cwd" to aliceRoot, "sessionId" to "s-1", "message" to message)) + "\n"
+        Files.newBufferedWriter(transcript, Charsets.UTF_8, java.nio.file.StandardOpenOption.APPEND).use { out ->
+            repeat(50 * 1024 * 1024 / line.length) { out.write(line) }
+        }
+        val archive = tmp.root.toPath().resolve("export.zip")
+        val pc2 = Pc("PC_2", "bob")
+        val bobDemo = pc2.projectFolder("lavoro", "demo")
+
+        val started = System.nanoTime()
+        exportFrom(pc1, listOf(SessionScanner.listSessions(pc1.home).single()), archive)
+        val outcome = SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = pc2.root.toString())
+        val seconds = (System.nanoTime() - started) / 1_000_000_000.0
+
+        assertEquals(emptyList<ImportFailure>(), outcome.failures)
+        assertTrue("took $seconds s", seconds < 240)
+        assertTrue(Files.size(transcriptOn(pc2, bobDemo, "s-1")) > 45L * 1024 * 1024)
     }
 }

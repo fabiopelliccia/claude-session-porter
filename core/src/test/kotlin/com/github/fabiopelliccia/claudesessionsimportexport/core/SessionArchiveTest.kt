@@ -4,7 +4,6 @@ import com.google.gson.JsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -40,7 +39,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `exports and imports a session into a fresh home`() {
         val sourceHome = tmp.newFolder("source", ".claude").toPath()
         val cwd = "C:\\Users\\fabio\\demo"
@@ -52,7 +50,7 @@ class SessionArchiveTest {
         assertTrue(Files.exists(archive))
 
         val targetHome = tmp.newFolder("target", ".claude").toPath()
-        val importOutcome = SessionArchive.import(archive, home = targetHome)
+        val importOutcome = SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
 
         assertEquals(1, importOutcome.imported.size)
         val written = importOutcome.imported.single()
@@ -74,7 +72,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `importing twice duplicates under a new id instead of overwriting`() {
         val sourceHome = tmp.newFolder("source2", ".claude").toPath()
         val cwd = "C:\\Users\\fabio\\demo2"
@@ -84,10 +81,10 @@ class SessionArchiveTest {
         SessionArchive.export(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target2", ".claude").toPath()
-        val first = SessionArchive.import(archive, home = targetHome)
+        val first = SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
         assertEquals("new", first.imported.single().action)
 
-        val second = SessionArchive.import(archive, home = targetHome, conflictPolicy = ConflictPolicy.DUPLICATE)
+        val second = SessionArchive.import(archive, home = targetHome, conflictPolicy = ConflictPolicy.DUPLICATE, targetProjectPath = cwd)
         val duplicated = second.imported.single()
         assertEquals("duplicated", duplicated.action)
         assertTrue(duplicated.writtenId != "session-2")
@@ -175,7 +172,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `imported timestamps are shifted to look recent while keeping their spacing`() {
         val sourceHome = tmp.newFolder("source5", ".claude").toPath()
         val cwd = "C:\\Users\\fabio\\demo5"
@@ -194,7 +190,7 @@ class SessionArchiveTest {
         SessionArchive.export(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target5", ".claude").toPath()
-        SessionArchive.import(archive, home = targetHome)
+        SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
 
         val transcript = targetHome.resolve("projects")
             .resolve(ClaudePaths.encodeProjectPath(cwd))
@@ -210,7 +206,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `shiftTimestampsToNow = false leaves timestamps exactly as recorded`() {
         val sourceHome = tmp.newFolder("source6", ".claude").toPath()
         val cwd = "C:\\Users\\fabio\\demo6"
@@ -220,7 +215,7 @@ class SessionArchiveTest {
         SessionArchive.export(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target6", ".claude").toPath()
-        SessionArchive.import(archive, home = targetHome, shiftTimestampsToNow = false)
+        SessionArchive.import(archive, home = targetHome, shiftTimestampsToNow = false, targetProjectPath = cwd)
 
         val transcript = targetHome.resolve("projects")
             .resolve(ClaudePaths.encodeProjectPath(cwd))
@@ -229,7 +224,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `SKIP policy leaves an already present session untouched`() {
         val sourceHome = tmp.newFolder("source3", ".claude").toPath()
         val cwd = "C:\\Users\\fabio\\demo3"
@@ -239,9 +233,9 @@ class SessionArchiveTest {
         SessionArchive.export(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target3", ".claude").toPath()
-        SessionArchive.import(archive, home = targetHome)
+        SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
 
-        val second = SessionArchive.import(archive, home = targetHome, conflictPolicy = ConflictPolicy.SKIP)
+        val second = SessionArchive.import(archive, home = targetHome, conflictPolicy = ConflictPolicy.SKIP, targetProjectPath = cwd)
         assertTrue(second.imported.isEmpty())
         assertEquals(listOf("session-3"), second.skipped)
         assertFalse(
@@ -372,7 +366,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `REPLACE removes the local session wherever it lives`() {
         val sourceHome = tmp.newFolder("source10", ".claude").toPath()
         val sourceCwd = "C:\\Users\\fabio\\Demo10"
@@ -382,7 +375,7 @@ class SessionArchiveTest {
 
         // First restored into its own folder, then replaced into another one.
         val targetHome = tmp.newFolder("target10", ".claude").toPath()
-        SessionArchive.import(archive, home = targetHome)
+        SessionArchive.import(archive, home = targetHome, targetProjectPath = sourceCwd)
         assertTrue(Files.exists(transcriptOf(targetHome, sourceCwd, "session-10")))
 
         val target = "D:\\Work\\Demo10"
@@ -403,7 +396,7 @@ class SessionArchiveTest {
         SessionArchive.export(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target11", ".claude").toPath()
-        SessionArchive.import(archive, home = targetHome)
+        SessionArchive.import(archive, home = targetHome, targetProjectPath = "C:\\Users\\fabio\\Demo11")
         val second = SessionArchive.import(archive, home = targetHome, conflictPolicy = ConflictPolicy.SKIP, targetProjectPath = "D:\\Elsewhere")
         assertEquals(listOf("session-11"), second.skipped)
         assertFalse(Files.exists(transcriptOf(targetHome, "D:\\Elsewhere", "session-11")))
@@ -481,7 +474,6 @@ class SessionArchiveTest {
     }
 
     @Test
-    @Ignore("WP5: needs the format 2 import (token pass, target folder)")
     fun `a failure while importing one session does not stop the others`() {
         val sourceHome = tmp.newFolder("source16", ".claude").toPath()
         val sessions = listOf(
@@ -497,7 +489,7 @@ class SessionArchiveTest {
         val existing = SessionScanner.existingTranscripts(targetHome)
         assertTrue(existing.isEmpty())
 
-        val outcome = SessionArchive.import(archive, home = targetHome)
+        val outcome = SessionArchive.import(archive, home = targetHome, targetProjectPath = "C:\\Users\\fabio\\Demo16")
         assertEquals(listOf("session-16a"), outcome.failures.map { it.sessionId })
         assertEquals(listOf("session-16b"), outcome.imported.map { it.writtenId })
     }
