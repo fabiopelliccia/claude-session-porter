@@ -39,8 +39,10 @@ import kotlin.io.path.isRegularFile
  * **Format 2** (the only one written since 2.0.0) is then anonymized: every path anchor that names
  * the exporting user - the session's project root, the Claude home, the user's home, in any of the
  * spellings [PathAnonymizer] knows - is replaced by a typed token, in the transcripts (string values
- * and object keys alike), in the other text files of the session, in the ZIP entry names and in the
- * manifest; binary files are copied as they were and only scanned. The manifest records the token
+ * and object keys alike), in the other text files of the session (UTF-8, or UTF-16 with a byte order
+ * mark, each written back in its own encoding), in the ZIP entry names and in the manifest; binary
+ * files, and files too large to be read whole, are copied as they were and only scanned. The account
+ * email and git user name are removed wherever they are ([AccountIdentityScrubber]). The manifest records the token
  * prefix and the source operating system in its `anonymization` block. Format 1 archives (no tokens,
  * the source machine's own paths) are still read.
  */
@@ -323,6 +325,10 @@ object SessionArchive {
                 } catch (e: Exception) {
                     sessionLog.failure("import of ${session.id} failed", e)
                     failures += ImportFailure(session.id, e.message ?: e.javaClass.simpleName)
+                } catch (e: OutOfMemoryError) {
+                    // A transcript too large for the heap is about this session only; its staging folder is already gone.
+                    sessionLog.failure("import of ${session.id} failed", e)
+                    failures += ImportFailure(session.id, e.message ?: e.javaClass.simpleName)
                 }
             }
         }
@@ -551,7 +557,7 @@ object SessionArchive {
             val isTranscript = rewriter != null && entry.name.endsWith(".jsonl", ignoreCase = true)
             if (isTranscript) {
                 val text = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
-                val structural = rewriter!!.rewrite(text, stats)
+                val structural = rewriter.rewrite(text, stats)
                 val renderedText = deanonymizer?.deanonymizeJsonl(structural, rendered) ?: structural
                 Files.write(target, (ownPaths?.renamed(renderedText) ?: renderedText).toByteArray(StandardCharsets.UTF_8))
                 rewritten++
