@@ -4,14 +4,13 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStream
 import java.io.StringReader
-import java.nio.ByteBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.time.Instant
 import java.util.zip.ZipEntry
@@ -32,12 +31,17 @@ import kotlin.io.path.isRegularFile
  *   staying byte for byte what it was;
  * - any other file of the auxiliary folder and of the file history: UTF-8 text (no NUL) goes through
  *   the same anchor replacement as plain text, anything else is copied verbatim and only scanned, a
- *   hit being reported by entry name;
+ *   hit being reported by entry name. A file above [LARGE_FILE_BYTES] is never read whole: it is
+ *   scanned in chunks and copied as it is, and reported like a binary one;
  * - the ZIP entry names and the manifest values that hold a path (`projectPath`, `projectFolderName`,
  *   `gitBranch`), with `summary` taken again from the anonymized transcript.
  *
  * One [PathAnonymizer] per session, holding only that session's root: a token carries no index, so a
  * second root would render back to the same folder (see [SourceIdentity]).
+ *
+ * The archive is written to a temporary file next to [destination] and moved over it at the end, so a
+ * destination that already exists is never left half written; a file that cannot be read (an error as
+ * well as an exception) is reported and left out, it does not stop the export.
  */
 internal class SessionExporter(
     private val sessions: List<SessionInfo>,
@@ -46,6 +50,10 @@ internal class SessionExporter(
     private val progress: TransferProgress,
     private val producer: ProducerInfo,
     private val identity: SourceIdentity,
+    /** Files above this size are not read whole; a parameter so that a test does not need a file of 32 MB. */
+    private val largeFileBytes: Long = LARGE_FILE_BYTES,
+    /** How a file is read into memory; a parameter so that a test can make it fail. */
+    private val readBytes: (Path) -> ByteArray = Files::readAllBytes,
 ) {
 
     private val warnings = mutableListOf<String>()
@@ -59,14 +67,21 @@ internal class SessionExporter(
     /** The operating systems the project paths of the exported sessions are written for. */
     private val seenOs = linkedSetOf<PathOs>()
 
-    /** What was prepared for one entry: its bytes and what the pass over them counted. */
+    /**
+     * What was prepared for one entry: its bytes (or, for a file too large to read whole, the file they
+     * are copied from) and what the pass over them counted.
+     */
     private class Prepared(
-        val bytes: ByteArray,
+        val bytes: ByteArray?,
         val stats: PathAnonymizer.Stats,
         val partialLineDropped: Boolean = false,
         val binaryHits: Int = 0,
         /** The anonymized text of a transcript, kept to pick the session's title. */
         val text: String? = null,
+        /** Set when [bytes] is `null`: the file the entry is streamed from. */
+        val copiedFrom: Path? = null,
+        /** A transcript that holds no complete line at all. */
+        val isEmpty: Boolean = false,
     )
 
     /** The counts of every entry, merged; [residualEntries] and [binaryEntries] say where they were found. */
@@ -90,69 +105,16 @@ internal class SessionExporter(
     }
 
     fun run(): ExportOutcome {
-        val projectsDir = ClaudePaths.projectsDir(home)
-        // One prefix for the whole archive, known before the first line is anonymized.
-        val prefix = PathTokens.choosePrefix { needle -> sourcesContain(projectsDir, needle) }
-
-        Files.createDirectories(destination.toAbsolutePath().parent)
-        ZipOutputStream(Files.newOutputStream(destination).buffered()).use { zip ->
-            sessions.forEachIndexed { index, session ->
-                progress.report(
-                    index.toDouble() / sessions.size,
-                    ClaudeSessionsBundle.message("progress.exportingSession", session.displayName),
-                )
-
-                val projectDir = projectsDir.resolve(session.projectFolderName)
-                val transcript = projectDir.resolve("${session.id}.jsonl")
-                if (!transcript.isRegularFile()) {
-                    warnings += ClaudeSessionsBundle.message("export.warning.noTranscript", session.displayName)
-                    return@forEachIndexed
-                }
-                val anonymizer = PathAnonymizer(identity.withRoots(listOfNotNull(session.projectPath)), prefix)
-
-                // Read, redact, anonymize and re-encode before the entry is opened: a file that fails
-                // half way must not leave a truncated transcript in the archive.
-                val main = try {
-                    prepareTranscript(transcript, anonymizer)
-                } catch (e: IOException) {
-                    unreadable++
-                    warnings += ClaudeSessionsBundle.message("export.warning.unreadable", session.displayName, transcript)
-                    return@forEachIndexed
-                }
-                if (main.partialLineDropped) notePartialLine(session, TRANSCRIPT_NAME)
-                writeEntry(zip, SessionArchive.transcriptEntry(session.id), main, anonymizer)
-
-                val auxDir = projectDir.resolve(session.id)
-                if (auxDir.isDirectory()) {
-                    // A subagent run under here is a transcript of its own, in the same format, and
-                    // gets the same passes; other files (tool results, ...) are text or binary.
-                    copyDirectory(auxDir, SessionArchive.auxPrefix(session.id), zip, anonymizer, transcripts = true, session = session)
-                }
-                val fileHistoryDir = ClaudePaths.fileHistoryDir(home).resolve(session.id)
-                if (fileHistoryDir.isDirectory()) {
-                    // Raw backups of the user's own files, never a transcript: never redacted.
-                    copyDirectory(fileHistoryDir, SessionArchive.fileHistoryPrefix(session.id), zip, anonymizer, transcripts = false, session = session)
-                }
-                session.projectPath?.let { seenOs += PathOs.of(ClaudePaths.normalizeProjectPath(it)) }
-                exported += manifestEntry(session, anonymizer, main, auxDir.isDirectory(), fileHistoryDir.isDirectory())
-            }
-
-            // Written last, so it lists exactly the sessions that made it into the archive.
-            val manifest = SessionArchive.ArchiveManifest(
-                formatVersion = SessionArchive.FORMAT_VERSION,
-                exportedAt = Instant.now().toString(),
-                producer = SessionArchive.PRODUCER,
-                sessions = exported,
-                producerComponent = producer.component,
-                producerVersion = producer.version,
-                anonymization = SessionArchive.AnonymizationInfo(
-                    tokenPrefix = prefix,
-                    kinds = totals.replacedByKind.keys.toList(),
-                    sourceOs = sourceOs().name.lowercase(),
-                ),
-            )
-            writeRaw(zip, SessionArchive.MANIFEST_ENTRY, SessionArchive.toJson(manifest).toByteArray(StandardCharsets.UTF_8))
-            progress.report(1.0, ClaudeSessionsBundle.message("progress.exportCompleted"))
+        val parent = destination.toAbsolutePath().parent
+        Files.createDirectories(parent)
+        // Written next to the destination (so the move below never crosses a volume) and moved over it
+        // at the end: whatever goes wrong before that, the destination is what it was.
+        val temporary = Files.createTempFile(parent, TEMPORARY_PREFIX, TEMPORARY_SUFFIX)
+        try {
+            ZipOutputStream(Files.newOutputStream(temporary).buffered()).use { zip -> writeArchive(zip) }
+            moveOverDestination(temporary)
+        } finally {
+            Files.deleteIfExists(temporary)
         }
         return ExportOutcome(
             exportedCount = exported.size,
@@ -169,6 +131,99 @@ internal class SessionExporter(
             keyCollisions = totals.keyCollisions,
         )
     }
+
+    private fun moveOverDestination(temporary: Path) {
+        try {
+            Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
+        } catch (e: AtomicMoveNotSupportedException) {
+            Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+
+    private fun writeArchive(zip: ZipOutputStream) {
+        val projectsDir = ClaudePaths.projectsDir(home)
+        // One prefix for the whole archive, known before the first line is anonymized.
+        val prefix = PathTokens.choosePrefix { needle -> sourcesContain(projectsDir, needle) }
+
+        sessions.forEachIndexed { index, session ->
+            progress.report(
+                index.toDouble() / sessions.size,
+                ClaudeSessionsBundle.message("progress.exportingSession", session.displayName),
+            )
+            exportSession(zip, session, projectsDir, prefix)
+        }
+
+        // Written last, so it lists exactly the sessions that made it into the archive.
+        val manifest = SessionArchive.ArchiveManifest(
+            formatVersion = SessionArchive.FORMAT_VERSION,
+            exportedAt = Instant.now().toString(),
+            producer = SessionArchive.PRODUCER,
+            sessions = exported,
+            producerComponent = producer.component,
+            producerVersion = producer.version,
+            anonymization = SessionArchive.AnonymizationInfo(
+                tokenPrefix = prefix,
+                kinds = totals.replacedByKind.keys.toList(),
+                sourceOs = sourceOs().name.lowercase(),
+            ),
+        )
+        writeRaw(zip, SessionArchive.MANIFEST_ENTRY, SessionArchive.toJson(manifest).toByteArray(StandardCharsets.UTF_8))
+        progress.report(1.0, ClaudeSessionsBundle.message("progress.exportCompleted"))
+    }
+
+    private fun exportSession(zip: ZipOutputStream, session: SessionInfo, projectsDir: Path, prefix: String) {
+        val projectDir = projectsDir.resolve(session.projectFolderName)
+        val transcript = projectDir.resolve("${session.id}.jsonl")
+        if (!transcript.isRegularFile()) {
+            warnings += ClaudeSessionsBundle.message("export.warning.noTranscript", session.displayName)
+            return
+        }
+        val anonymizer = PathAnonymizer(identity.withRoots(listOfNotNull(session.projectPath)), prefix)
+
+        // Read, redact, anonymize and re-encode before the entry is opened: a file that fails
+        // half way must not leave a truncated transcript in the archive.
+        val main = unlessUnreadable({ unreadableFile(session, transcript) }) { prepareTranscript(transcript, anonymizer) } ?: return
+        if (main.isEmpty) {
+            // Nothing but a fragment of a line (or nothing at all): a session that would import as an empty one.
+            warnings += ClaudeSessionsBundle.message("export.warning.emptySession", session.displayName)
+            return
+        }
+        if (main.partialLineDropped) notePartialLine(session, TRANSCRIPT_NAME)
+        writeEntry(zip, SessionArchive.transcriptEntry(session.id), main, anonymizer)
+
+        val auxDir = projectDir.resolve(session.id)
+        if (auxDir.isDirectory()) {
+            // A subagent run under here is a transcript of its own, in the same format, and
+            // gets the same passes; other files (tool results, ...) are text or binary.
+            copyDirectory(auxDir, SessionArchive.auxPrefix(session.id), zip, anonymizer, transcripts = true, session = session)
+        }
+        val fileHistoryDir = ClaudePaths.fileHistoryDir(home).resolve(session.id)
+        if (fileHistoryDir.isDirectory()) {
+            // Raw backups of the user's own files, never a transcript: never redacted.
+            copyDirectory(fileHistoryDir, SessionArchive.fileHistoryPrefix(session.id), zip, anonymizer, transcripts = false, session = session)
+        }
+        session.projectPath?.let { seenOs += PathOs.of(ClaudePaths.normalizeProjectPath(it)) }
+        exported += manifestEntry(session, anonymizer, main, auxDir.isDirectory(), fileHistoryDir.isDirectory())
+    }
+
+    /**
+     * Runs [block] and returns its result; when reading fails - with an exception, or with an error that is
+     * about this file only (a file too large for the heap, a document nested too deep to parse) - calls [onFailure]
+     * and returns `null`. Other errors are not about the file and go on.
+     */
+    private fun <T> unlessUnreadable(onFailure: () -> Unit, block: () -> T): T? =
+        try {
+            block()
+        } catch (e: Exception) {
+            onFailure()
+            null
+        } catch (e: OutOfMemoryError) {
+            onFailure()
+            null
+        } catch (e: StackOverflowError) {
+            onFailure()
+            null
+        }
 
     /**
      * The operating system the paths of the archive are written for: the one of the project paths when every exported
@@ -222,22 +277,50 @@ internal class SessionExporter(
 
     private fun prepareTranscript(file: Path, anonymizer: PathAnonymizer): Prepared {
         val stats = PathAnonymizer.Stats()
-        val text = Files.readString(file, StandardCharsets.UTF_8)
         // A line still being written has no newline yet: the fragment is not a message, leave it out.
-        val lastNewline = text.lastIndexOf('\n')
-        val partial = text.substring(lastNewline + 1).isNotBlank()
-        val whole = if (partial) text.substring(0, lastNewline + 1) else text
-        val anonymized = anonymizer.anonymizeJsonl(SessionRedactor.redact(whole, redaction), stats)
-        return Prepared(anonymized.toByteArray(StandardCharsets.UTF_8), stats, partialLineDropped = partial, text = anonymized)
+        val lines = completeLinesOf(readBytes(file))
+        val anonymized = anonymizer.anonymizeJsonl(SessionRedactor.redact(lines.text, redaction), stats)
+        return Prepared(
+            anonymized.toByteArray(StandardCharsets.UTF_8), stats,
+            partialLineDropped = lines.partialLineDropped, text = anonymized, isEmpty = lines.text.isBlank(),
+        )
     }
 
-    /** A file that is not a transcript: UTF-8 text is anonymized, anything else is copied and scanned. */
+    /**
+     * A file that is not a transcript: UTF-8 text is anonymized, anything else is copied and scanned. A file
+     * above [largeFileBytes] is neither read whole nor anonymized (see [copiedAfterScan]).
+     */
     private fun prepareFile(file: Path, anonymizer: PathAnonymizer): Prepared {
+        if (Files.size(file) > largeFileBytes) return copiedAfterScan(file, anonymizer)
         val stats = PathAnonymizer.Stats()
-        val bytes = Files.readAllBytes(file)
+        val bytes = readBytes(file)
         val text = decodeUtf8Text(bytes) ?: return Prepared(bytes, stats, binaryHits = anonymizer.scanBytes(bytes))
         val anonymized = anonymizer.anonymizeText(text, stats)
         return Prepared(if (anonymized == text) bytes else anonymized.toByteArray(StandardCharsets.UTF_8), stats)
+    }
+
+    /**
+     * A file too large to hold in memory: it is read once, in chunks, to look for what [PathAnonymizer.scanBytes]
+     * looks for, and is then streamed into the archive as it is. A file that is read whole before the first byte
+     * is written cannot leave a truncated entry behind. What it holds is not anonymized, which is why a hit is
+     * reported like the one of a binary file.
+     */
+    private fun copiedAfterScan(file: Path, anonymizer: PathAnonymizer): Prepared {
+        val buffer = ByteArray(SCAN_CHUNK_BYTES + SCAN_OVERLAP_BYTES)
+        var carried = 0
+        var hits = 0
+        Files.newInputStream(file).use { input ->
+            while (hits == 0) {
+                val read = input.readNBytes(buffer, carried, SCAN_CHUNK_BYTES)
+                if (read == 0) break
+                val length = carried + read
+                hits = anonymizer.scanBytes(buffer.copyOf(length))
+                // A match may straddle two chunks: the end of this one is looked at again with the next.
+                carried = minOf(SCAN_OVERLAP_BYTES, length)
+                System.arraycopy(buffer, length - carried, buffer, 0, carried)
+            }
+        }
+        return Prepared(bytes = null, stats = PathAnonymizer.Stats(), binaryHits = hits, copiedFrom = file)
     }
 
     /**
@@ -256,16 +339,13 @@ internal class SessionExporter(
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                 if (!attrs.isRegularFile) return FileVisitResult.CONTINUE
                 val relative = dir.relativize(file).toString().replace('\\', '/')
-                val prepared = try {
+                val prepared = unlessUnreadable({ unreadableFile(session, file) }) {
                     if (transcripts && file.fileName.toString().endsWith(".jsonl", ignoreCase = true)) {
                         prepareTranscript(file, anonymizer)
                     } else {
                         prepareFile(file, anonymizer)
                     }
-                } catch (e: IOException) {
-                    unreadableFile(session, file)
-                    return FileVisitResult.CONTINUE
-                }
+                } ?: return FileVisitResult.CONTINUE
                 if (prepared.partialLineDropped) notePartialLine(session, relative)
                 writeEntry(zip, entryPrefix + relative, prepared, anonymizer)
                 return FileVisitResult.CONTINUE
@@ -291,7 +371,8 @@ internal class SessionExporter(
     /** Writes [prepared] under [name], which is anonymized itself (a file may be called `C--Users-alice-x.txt`). */
     private fun writeEntry(zip: ZipOutputStream, name: String, prepared: Prepared, anonymizer: PathAnonymizer) {
         val nameStats = PathAnonymizer.Stats()
-        val entry = writeRaw(zip, anonymizer.anonymizeText(name, nameStats), prepared.bytes)
+        val entryName = anonymizer.anonymizeText(name, nameStats)
+        val entry = if (prepared.bytes != null) writeRaw(zip, entryName, prepared.bytes) else streamFile(zip, entryName, prepared.copiedFrom!!)
         totals.add(entry, nameStats)
         totals.add(entry, prepared.stats)
         if (prepared.binaryHits > 0) totals.binaryEntries += entry
@@ -299,37 +380,41 @@ internal class SessionExporter(
 
     /** Writes an entry and returns the name it got: two names that anonymize alike do not collide. */
     private fun writeRaw(zip: ZipOutputStream, name: String, content: ByteArray): String {
-        val unique = uniqueName(name)
+        val unique = uniqueEntryName(name, usedNames)
         zip.putNextEntry(ZipEntry(unique))
         zip.write(content)
         zip.closeEntry()
         return unique
     }
 
-    private fun uniqueName(name: String): String {
-        if (usedNames.add(name)) return name
-        val slash = name.lastIndexOf('/')
-        val dot = name.lastIndexOf('.')
-        val cut = if (dot > slash + 1) dot else name.length
-        var number = 2
-        while (true) {
-            val candidate = name.substring(0, cut) + "~$number" + name.substring(cut)
-            if (usedNames.add(candidate)) return candidate
-            number++
-        }
+    /** [writeRaw] for a file that is copied into the entry as it is, without being held in memory. */
+    private fun streamFile(zip: ZipOutputStream, name: String, file: Path): String {
+        val unique = uniqueEntryName(name, usedNames)
+        zip.putNextEntry(ZipEntry(unique))
+        Files.copy(file, zip)
+        zip.closeEntry()
+        return unique
     }
 
     // ------------------------------------------------------------------------------ token prefix --
 
-    /** Whether any file of any session (or a value the manifest carries) holds [needle]. */
+    /**
+     * Whether any file of any session, the name of any of them (it becomes an entry name, and the import renders
+     * tokens in entry names) or a value the manifest carries holds [needle].
+     */
     private fun sourcesContain(projectsDir: Path, needle: String): Boolean {
         val bytes = needle.toByteArray(StandardCharsets.UTF_8)
         return sessions.any { session ->
             val values = listOfNotNull(session.summary, session.projectPath, session.projectFolderName, session.gitBranch)
             if (values.any { needle in it }) return@any true
             val projectDir = projectsDir.resolve(session.projectFolderName)
-            val sources = listOf(projectDir.resolve("${session.id}.jsonl")) +
-                filesUnder(projectDir.resolve(session.id)) + filesUnder(ClaudePaths.fileHistoryDir(home).resolve(session.id))
+            val auxDir = projectDir.resolve(session.id)
+            val historyDir = ClaudePaths.fileHistoryDir(home).resolve(session.id)
+            val auxFiles = filesUnder(auxDir)
+            val historyFiles = filesUnder(historyDir)
+            val names = auxFiles.map { auxDir.relativize(it).toString() } + historyFiles.map { historyDir.relativize(it).toString() }
+            if (names.any { needle in it }) return@any true
+            val sources = listOf(projectDir.resolve("${session.id}.jsonl")) + auxFiles + historyFiles
             sources.any { fileContains(it, bytes) || decodedContains(it, needle) }
         }
     }
@@ -337,25 +422,23 @@ internal class SessionExporter(
     /**
      * Whether a `.jsonl` [file] holds [needle] once its lines are parsed: JSON can write the braces
      * of `{{SP` as unicode escapes, which a scan of the bytes misses and which the import would then take for a
-     * token of its own. Only the strings and keys of the parsed lines count, as in the anonymizer.
+     * token of its own. Only the strings and keys of the parsed lines count, as in the anonymizer. The file is read
+     * line by line, and only a line that holds an escape is parsed.
      */
     private fun decodedContains(file: Path, needle: String): Boolean {
         if (!file.fileName.toString().endsWith(".jsonl", ignoreCase = true) || !file.isRegularFile()) return false
-        val text = try {
-            Files.readString(file, StandardCharsets.UTF_8)
+        return try {
+            Files.newBufferedReader(file, StandardCharsets.UTF_8).use { reader -> reader.lineSequence().any { line -> lineHoldsDecoded(line, needle) } }
         } catch (e: IOException) {
-            return false
+            false // not UTF-8: the byte scan has seen what there is
         }
-        if (!text.contains(UNICODE_ESCAPE)) return false // nothing is escaped: the byte scan has seen it all
+    }
+
+    private fun lineHoldsDecoded(line: String, needle: String): Boolean {
+        if (!line.contains(UNICODE_ESCAPE)) return false // nothing is escaped: the byte scan has seen it all
+        val element = JsonLines.parse(line) ?: return false
         var found = false
-        JsonLines.mapLines(text) { line ->
-            if (!found) {
-                JsonLines.parse(line)?.let { element ->
-                    JsonLines.mapStrings(element, { value -> if (needle in value) found = true; value }, {})
-                }
-            }
-            line
-        }
+        JsonLines.mapStrings(element, { value -> if (needle in value) found = true; value }, {})
         return found
     }
 
@@ -400,11 +483,36 @@ internal class SessionExporter(
         return -1
     }
 
-    private companion object {
+    internal companion object {
         const val TRANSCRIPT_NAME = "transcript.jsonl"
+
+        /** How much of a file too large to read whole is looked at in one go, and how much of the end of it is looked at again. */
+        const val SCAN_CHUNK_BYTES = 1 shl 20
+        const val SCAN_OVERLAP_BYTES = 4096
+
+        const val TEMPORARY_PREFIX = ".session-porter-"
+        const val TEMPORARY_SUFFIX = ".zip.tmp"
 
         /** A backslash and a `u`: how JSON starts a unicode escape. */
         val UNICODE_ESCAPE = "\\" + "u"
+    }
+}
+
+/**
+ * [name] if [used] does not hold it yet, otherwise the first of `name~2`, `name~3`... (the number goes before the
+ * extension) that it does not hold; the name that is returned is added to [used]. Two files whose names anonymize to
+ * the same one, or that differ only by case on a case-sensitive file system, stay two entries.
+ */
+internal fun uniqueEntryName(name: String, used: MutableSet<String>): String {
+    if (used.add(name)) return name
+    val slash = name.lastIndexOf('/')
+    val dot = name.lastIndexOf('.')
+    val cut = if (dot > slash + 1) dot else name.length
+    var number = 2
+    while (true) {
+        val candidate = name.substring(0, cut) + "~$number" + name.substring(cut)
+        if (used.add(candidate)) return candidate
+        number++
     }
 }
 
@@ -413,13 +521,6 @@ internal class SessionExporter(
  * the export only scans and the import copies as it is.
  */
 internal fun decodeUtf8Text(bytes: ByteArray): String? {
-    val text = try {
-        StandardCharsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(bytes)).toString()
-    } catch (e: CharacterCodingException) {
-        return null
-    }
+    val text = decodeStrictly(bytes, 0, bytes.size) ?: return null
     return text.takeIf { '\u0000' !in it }
 }

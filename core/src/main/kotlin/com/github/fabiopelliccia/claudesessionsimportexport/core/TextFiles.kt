@@ -4,6 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
+import java.nio.charset.MalformedInputException
 
 /**
  * A file above this size is never read whole into memory: the export copies it as it is, after scanning it
@@ -45,6 +46,44 @@ private fun encodingOf(bytes: ByteArray): TextEncoding =
         encoding.byteOrderMark.isNotEmpty() && bytes.size >= encoding.byteOrderMark.size &&
             encoding.byteOrderMark.indices.all { bytes[it] == encoding.byteOrderMark[it] }
     } ?: TextEncoding.UTF_8
+
+/**
+ * The [text] of a transcript up to its last complete line, and whether a fragment after it was [partialLineDropped].
+ * A transcript of a live session may end in the middle of a line, and even in the middle of a character.
+ */
+internal class CompleteLines(val text: String, val partialLineDropped: Boolean)
+
+private const val NEWLINE: Byte = 0x0A
+
+/**
+ * The complete lines of a transcript, found on the bytes (a cut inside a multi-byte character must not make the
+ * whole file unreadable) and then decoded strictly. What follows the last newline is a line still being written
+ * and is left out, unless it is a whole JSON document on its own (a writer that did not finish with a newline):
+ * then it is kept, with the newline it lacks, so that a later append does not glue to it. Blanks after the last
+ * newline are not a fragment. Throws [java.nio.charset.MalformedInputException] when the complete lines are not UTF-8.
+ */
+internal fun completeLinesOf(bytes: ByteArray): CompleteLines {
+    val tailStart = bytes.lastIndexOf(NEWLINE) + 1
+    if (isBlank(bytes, tailStart)) return CompleteLines(decodeLines(bytes, bytes.size), partialLineDropped = false)
+
+    val tail = decodeStrictly(bytes, tailStart, bytes.size)
+    if (tail != null && JsonLines.parse(tail) != null) {
+        return CompleteLines(decodeLines(bytes, bytes.size) + "\n", partialLineDropped = false)
+    }
+    return CompleteLines(decodeLines(bytes, tailStart), partialLineDropped = true)
+}
+
+private fun decodeLines(bytes: ByteArray, to: Int): String =
+    decodeStrictly(bytes, 0, to) ?: throw MalformedInputException(0)
+
+/** Whether `bytes[from..]` is nothing but spaces, tabs and carriage returns. */
+private fun isBlank(bytes: ByteArray, from: Int): Boolean {
+    for (index in from until bytes.size) {
+        val byte = bytes[index].toInt()
+        if (byte != ' '.code && byte != '\t'.code && byte != '\r'.code) return false
+    }
+    return true
+}
 
 /** `bytes[from until to]` decoded in [charset], or `null` when it is not valid in it. */
 internal fun decodeStrictly(bytes: ByteArray, from: Int, to: Int, charset: Charset = Charsets.UTF_8): String? =

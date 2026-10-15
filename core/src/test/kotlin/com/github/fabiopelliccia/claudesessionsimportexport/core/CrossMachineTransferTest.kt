@@ -1034,7 +1034,8 @@ class CrossMachineTransferTest {
         assertTrue(outcome.warnings.any { it.contains("subagents/agent-a1.jsonl") })
         val archived = textOf(archive, "sessions/s-1/transcript.jsonl")
         assertTrue(archived.endsWith("\n"))
-        assertFalse(archived.contains("assis\""))
+        // The fragment ends in "assis"; the whole lines say "assistant".
+        assertFalse(Regex("\"assis(?!tant)").containsMatchIn(archived))
         assertEquals(whole.count { it == '\n' }, archived.count { it == '\n' })
         assertTrue(textOf(archive, "sessions/s-1/aux/subagents/agent-a1.jsonl").endsWith("}\n"))
     }

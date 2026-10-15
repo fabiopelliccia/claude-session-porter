@@ -119,7 +119,14 @@ data class ExportOutcome(
     val partialLinesDropped: Int = 0,
     /** Object keys that two anonymized names would have merged: the later one got a `~2`-style counter, never its original name. */
     val keyCollisions: Int = 0,
-)
+) {
+    /**
+     * Whether something of the exporting user may be left in the archive: a bare user name outside any path
+     * ([residualUserNameHits]) or an anchor in a file that was only copied ([binaryEntriesWithHits]). This is what
+     * a strict privacy check fails on.
+     */
+    val hasPrivacyFindings: Boolean get() = residualUserNameHits > 0 || binaryEntriesWithHits.isNotEmpty()
+}
 
 /** Facts about the running IDE the import log records; supplied by `ui/`, which may read them. */
 data class ImportEnvironment(
