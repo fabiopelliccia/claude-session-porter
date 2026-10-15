@@ -45,7 +45,7 @@ class PathAnonymizer(
         var rewrittenLines = 0
         var unparsableLines = 0
 
-        /** Object keys that two anonymized names would have collapsed into one, left unrenamed. */
+        /** Object keys that two anonymized names would have collapsed into one: the later one got a `~2`-style counter. */
         var keyCollisions = 0
 
         val totalReplacements: Int get() = replacedByKind.values.sum()
@@ -94,7 +94,7 @@ class PathAnonymizer(
         if (!mayContainCandidate(text)) return text
         var current = text
         for (matcher in matchers) current = replace(matcher, current, stats)
-        if (residual != null) stats.residualUserNameHits += countMatches(residual, current)
+        stats.residualUserNameHits += countResidualUserName(current)
         return current
     }
 
@@ -143,8 +143,20 @@ class PathAnonymizer(
         }
     }
 
-    /** Whole-word hits of the user name in [text]; zero when the name is shorter than 4 characters. */
-    fun countResidualUserName(text: String): Int = residual?.let { countMatches(it, text) } ?: 0
+    /**
+     * Whole-word hits of the user name in [text]; zero when the name is shorter than 4 characters. The tokens
+     * of this anonymizer do not count: a user called `root` or `home` is not in every `ROOT` or `HOME` token.
+     */
+    fun countResidualUserName(text: String): Int {
+        if (residual == null) return 0
+        return countMatches(residual, withoutTokens(text))
+    }
+
+    /** [text] with every token of this anonymizer replaced by a space. */
+    private fun withoutTokens(text: String): String {
+        if (!PathTokens.contains(text, tokenPrefix)) return text
+        return PathTokens.regex(tokenPrefix).replace(text, " ")
+    }
 
     private fun replace(matcher: AnchorMatcher, text: String, stats: Stats): String {
         val found = matcher.pattern.matcher(text)

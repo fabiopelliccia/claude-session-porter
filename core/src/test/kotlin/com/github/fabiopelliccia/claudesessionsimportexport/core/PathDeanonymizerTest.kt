@@ -216,6 +216,24 @@ class PathDeanonymizerTest {
         assertEquals(0, PathTokens.count(restored, prefix))
     }
 
+    // Finding 17: the engine can only be told what the sources hold if the caller looks at decoded strings.
+    @Test
+    fun `a literal token written with unicode escapes is found in the decoded strings, so it gets a nonce prefix`() {
+        val line = """{"t":"\u007b\u007bSP:HOME:win}}","cwd":"C:\\Users\\alice\\IdeaProjects\\X"}"""
+        // The bytes of the line do not hold the marker, the strings of the parsed line do.
+        assertFalse(line.contains(PathTokens.MARKER))
+        val strings = mutableListOf<String>()
+        JsonLines.mapStrings(JsonLines.parse(line)!!, { strings += it; it }, {})
+        val prefix = PathTokens.choosePrefix { needle -> line.contains(needle) || strings.any { it.contains(needle) } }
+        assertTrue(prefix, prefix != PathTokens.DEFAULT_PREFIX)
+
+        val anonymized = PathAnonymizer(alice, prefix).anonymizeJsonLine(line)
+        val restored = PathDeanonymizer(bobRoot, """C:\Users\bob""", """C:\Users\bob\.claude""", tokenPrefix = prefix).deanonymizeJsonLine(anonymized)
+        val json = JsonParser.parseString(restored).asJsonObject
+        assertEquals("{{SP:HOME:win}}", json.get("t").asString)
+        assertEquals(bobRoot, json.get("cwd").asString)
+    }
+
     // -------------------------------------------------------------------------------- json lines --
 
     @Test

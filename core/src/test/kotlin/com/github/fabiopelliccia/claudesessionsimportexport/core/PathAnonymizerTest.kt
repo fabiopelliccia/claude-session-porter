@@ -199,11 +199,11 @@ class PathAnonymizerTest {
     }
 
     @Test
-    fun `two keys that would collapse into one keep the later name and are counted`() {
+    fun `two keys that would collapse into one get a counter on the later one and are counted`() {
         val line = gson.toJson(mapOf("""C:\Users\alice\a""" to 1, """C:\Users\ALICE\a""" to 2))
         val stats = PathAnonymizer.Stats()
         val out = JsonParser.parseString(anonymizer.anonymizeJsonLine(line, stats)).asJsonObject
-        assertEquals(setOf("""{{SP:HOME:win}}\a""", """C:\Users\ALICE\a"""), out.keySet())
+        assertEquals(setOf("""{{SP:HOME:win}}\a""", """{{SP:HOME:win}}\a~2"""), out.keySet())
         assertEquals(1, stats.keyCollisions)
     }
 
@@ -467,6 +467,44 @@ class PathAnonymizerTest {
         assertEquals("""cd {{SP:HOME:win}}\proj""", johnSmith.anonymizeText("cd C:\\Users\\John` Smith\\proj"))
         // The backslash of the escape is doubled with the level of the text it sits in.
         assertEquals("""cd {{SP:HOME:msys}}/proj""", johnSmith.anonymizeText("""cd /c/Users/John\\ Smith/proj"""))
+    }
+
+    // Finding 10: two keys that anonymize alike must not keep the raw one.
+    @Test
+    fun `finding 10 - a key that would collide is numbered, never left as the user wrote it`() {
+        val line = """{"trackedFileBackups":{"C:\\Users\\alice\\a.txt":1,"c:\\users\\ALICE\\a.txt":2,"C:/Users/alice/a.txt":3}}"""
+        val stats = PathAnonymizer.Stats()
+        val out = anonymizer.anonymizeJsonLine(line, stats)
+        val backups = JsonParser.parseString(out).asJsonObject.getAsJsonObject("trackedFileBackups")
+        // The first keeps its name; the later ones get a counter, the second of them a number that is free.
+        assertEquals(listOf("""{{SP:HOME:win}}\a.txt""", """{{SP:HOME:win}}\a.txt~2""", "{{SP:HOME:fwd}}/a.txt"), backups.keySet().toList())
+        assertEquals(listOf(1, 2, 3), backups.keySet().map { backups.get(it).asInt })
+        assertFalse(out.contains("alice", ignoreCase = true))
+        assertEquals(1, stats.keyCollisions)
+    }
+
+    @Test
+    fun `finding 10 - a numbered key is free even when the name is already taken`() {
+        val line = """{"C:\\Users\\alice\\a.txt":1,"c:\\users\\ALICE\\a.txt":2,"{{SP:HOME:win}}\\a.txt~2":3}"""
+        val out = JsonParser.parseString(anonymizer.anonymizeJsonLine(line)).asJsonObject
+        assertEquals(3, out.size())
+        assertEquals(listOf(1, 2, 3), out.keySet().map { out.get(it).asInt })
+        assertFalse(out.keySet().any { it.contains("alice", ignoreCase = true) })
+    }
+
+    // Finding 19: the user name is looked for in what the user wrote, not in the tokens.
+    @Test
+    fun `finding 19 - a user called root is not found in the ROOT tokens`() {
+        val root = PathAnonymizer(SourceIdentity(home = "/root", roots = listOf("/root/dev/demo")))
+        val stats = PathAnonymizer.Stats()
+        assertEquals("cd {{SP:ROOT:fwd}}/src and {{SP:HOME:fwd}}/x", root.anonymizeText("cd /root/dev/demo/src and /root/x", stats))
+        assertEquals(0, stats.residualUserNameHits)
+        assertEquals(0, root.countResidualUserName("{{SP:ROOT:fwd}}/src {{SP:HOME:enc}}"))
+        // A real mention is still counted, tokens or not.
+        val mention = PathAnonymizer.Stats()
+        root.anonymizeText("I am root in /root/dev/demo", mention)
+        assertEquals(1, mention.residualUserNameHits)
+        assertEquals(1, root.countResidualUserName("{{SP:ROOT:fwd}} says root"))
     }
 
     // Finding 8: a home without its drive (HOMEPATH, the admin share of the C drive) and a UNC home.

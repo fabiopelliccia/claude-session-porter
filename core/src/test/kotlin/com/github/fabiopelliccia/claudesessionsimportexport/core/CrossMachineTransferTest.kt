@@ -7,7 +7,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -965,9 +964,8 @@ class CrossMachineTransferTest {
         assertEquals("C:\\Users\\alice2\\x C:\\Users\\alice.bak\\y {{SP:HOME:win}}\\z C:\\Users\\aliceX", content)
     }
 
-    // The residual count of the engine runs on the text after the replacement, tokens included: for an
-    // account called root every {{SP:ROOT:..}} token is a hit. Reported in PROGRESS as a WP3 engine problem.
-    @Ignore("WP3 engine: PathAnonymizer counts the user name in the tokenized text, so a user called root matches every ROOT token")
+    // The residual count of the engine leaves the tokens out: for an account called root every
+    // {{SP:ROOT:..}} token would be a hit (WP3 review, finding 19).
     @Test
     fun `a user called root is not reported as residual because of the ROOT tokens`() {
         val pc1 = Pc("PC_1", "root")

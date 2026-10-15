@@ -96,7 +96,9 @@ internal object JsonLines {
     /**
      * Applies [transform] to every string value and every object key, recursively. Returns [element]
      * itself when nothing changed; a changed object is rebuilt keeping its key order. When two keys
-     * would collapse into one, the later one keeps its original name and [onKeyCollision] is called.
+     * would collapse into one, the later one gets a counter (`name~2`, `name~3`, the first free one) and
+     * [onKeyCollision] is called: its original name is never kept, because that name is the very thing
+     * that is being removed from the text (a path of the user's home), and neither value is lost.
      */
     fun mapStrings(element: JsonElement, transform: (String) -> String, onKeyCollision: () -> Unit): JsonElement {
         if (element.isJsonPrimitive) {
@@ -118,9 +120,9 @@ internal object JsonLines {
             for ((key, value) in obj.entrySet()) {
                 var newKey = transform(key)
                 val newValue = mapStrings(value, transform, onKeyCollision)
-                if (newKey != key && rebuilt.has(newKey)) {
+                if (rebuilt.has(newKey)) {
                     onKeyCollision()
-                    newKey = key
+                    newKey = firstFreeKey(rebuilt, newKey)
                 }
                 if (newKey != key || newValue !== value) changed = true
                 rebuilt.add(newKey, newValue)
@@ -128,6 +130,13 @@ internal object JsonLines {
             return if (changed) rebuilt else element
         }
         return element
+    }
+
+    /** `key~2`, `key~3`, ... the first one [taken] does not hold yet. */
+    private fun firstFreeKey(taken: JsonObject, key: String): String {
+        var counter = 2
+        while (taken.has("$key~$counter")) counter++
+        return "$key~$counter"
     }
 
     /**
