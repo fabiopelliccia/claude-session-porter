@@ -377,14 +377,6 @@ object SessionArchive {
         requireInside(projectsDir, targetDir.resolve(writtenId))
         requireInside(fileHistoryDir, fileHistoryDir.resolve(writtenId))
 
-        if (action == ACTION_REPLACED) {
-            // Replacing means the local session is gone afterwards, wherever it lived: leaving a
-            // copy in another project folder would keep two sessions with the same id around.
-            for (copy in existingCopies) {
-                deleteSession(copy, context.home, log)
-            }
-        }
-
         val tokens = context.tokens
         val mapper = tokens?.mapper ?: context.attachedFolder?.let { PathMapper(session.projectPath, it) }
         val delta = if (context.shift) {
@@ -395,85 +387,100 @@ object SessionArchive {
         log.kv("timestamps.delta", delta)
         log.kv("pathMapper.target", mapper?.target)
 
-        Files.createDirectories(targetDir)
         val targetFile = targetDir.resolve("$writtenId.jsonl")
         val rewriter = TranscriptRewriter(session.id, writtenId.takeIf { it != session.id }, mapper, delta)
-        val stats = TranscriptRewriter.Stats()
-        val rendered = PathDeanonymizer.Stats()
-        if (tokens != null) {
-            // Two passes, in this order: the fields Claude Code reads are mapped structurally (the tokens
-            // of the source project become the target folder), then every remaining token of every
-            // string and key is rendered for this machine. Never the byte copy, whatever else is identity.
-            val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
-            val structural = rewriter.rewrite(text, stats)
-            Files.write(targetFile, tokens.deanonymizer.deanonymizeJsonl(structural, rendered).toByteArray(StandardCharsets.UTF_8))
-        } else if (rewriter.isIdentity) {
-            zip.getInputStream(transcriptEntry).use { Files.copy(it, targetFile, StandardCopyOption.REPLACE_EXISTING) }
-            log.line("transcript copied byte for byte")
-        } else {
-            val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
-            Files.write(targetFile, rewriter.rewrite(text, stats).toByteArray(StandardCharsets.UTF_8))
-        }
-        if (!rewriter.isIdentity) {
-            log.kv("transcript.lines", stats.lines)
-            log.kv("transcript.rewrittenLines", stats.rewrittenLines)
-            log.kv("transcript.unparsableLines", stats.unparsableLines)
-            for ((field, count) in stats.changes) log.kv("transcript.changed.$field", count)
-        }
-        if (tokens != null) logRendered(log, "transcript", rendered)
 
-        // A subagent run under the auxiliary folder is a transcript of its own, recorded on the same
-        // machine with the same `cwd`, `sessionId` and timestamps: it gets the same rewrite as the
-        // main transcript, or the source user's paths would survive there. Other files are copied as-is,
-        // except in a format 2 archive, where every text file (and every entry name) has its tokens rendered.
-        val auxStats = TranscriptRewriter.Stats()
-        val auxRendered = PathDeanonymizer.Stats()
-        val aux = extractEntries(zip, auxPrefix(session.id), targetDir.resolve(writtenId), rewriter.takeIf { !it.isIdentity }, auxStats, tokens?.deanonymizer, auxRendered)
-        log.kv("aux.filesWritten", aux.written)
-        log.kv("aux.rewrittenTranscripts", aux.rewritten)
-        for ((field, count) in auxStats.changes) log.kv("aux.changed.$field", count)
-        if (tokens != null) logRendered(log, "aux", auxRendered)
-        val historyRendered = PathDeanonymizer.Stats()
-        val fileHistory = extractEntries(
-            zip, fileHistoryPrefix(session.id), ClaudePaths.fileHistoryDir(context.home).resolve(writtenId),
-            deanonymizer = tokens?.deanonymizer, rendered = historyRendered,
-        )
-        log.kv("fileHistory.filesWritten", fileHistory.written)
-        if (tokens != null) logRendered(log, "fileHistory", historyRendered)
-        val discarded = aux.discarded + fileHistory.discarded
-        if (discarded.isNotEmpty()) log.kv("discardedZipSlipEntries", discarded)
+        // The whole session is built in a staging folder first and moved into the Claude home only
+        // when it is complete: a corrupt entry must not leave half a session behind, nor take the
+        // local copy a REPLACE is about to remove with it.
+        return SessionStaging(context.home).use { staging ->
+            val stats = TranscriptRewriter.Stats()
+            val rendered = PathDeanonymizer.Stats()
+            if (tokens != null) {
+                // Two passes, in this order: the fields Claude Code reads are mapped structurally (the tokens
+                // of the source project become the target folder), then every remaining token of every
+                // string and key is rendered for this machine. Never the byte copy, whatever else is identity.
+                val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
+                val structural = rewriter.rewrite(text, stats)
+                Files.write(staging.transcript, tokens.deanonymizer.deanonymizeJsonl(structural, rendered).toByteArray(StandardCharsets.UTF_8))
+            } else if (rewriter.isIdentity) {
+                zip.getInputStream(transcriptEntry).use { Files.copy(it, staging.transcript, StandardCopyOption.REPLACE_EXISTING) }
+                log.line("transcript copied byte for byte")
+            } else {
+                val text = zip.getInputStream(transcriptEntry).bufferedReader(StandardCharsets.UTF_8).readText()
+                Files.write(staging.transcript, rewriter.rewrite(text, stats).toByteArray(StandardCharsets.UTF_8))
+            }
+            if (!rewriter.isIdentity) {
+                log.kv("transcript.lines", stats.lines)
+                log.kv("transcript.rewrittenLines", stats.rewrittenLines)
+                log.kv("transcript.unparsableLines", stats.unparsableLines)
+                for ((field, count) in stats.changes) log.kv("transcript.changed.$field", count)
+            }
+            if (tokens != null) logRendered(log, "transcript", rendered)
 
-        // Re-read from disk: the notification and the diagnosis describe what Claude Code will
-        // actually find, not what this method meant to write.
-        val written = SessionScanner.describe(targetFile, context.home)
-        log.kv("reread.cwd", written.projectPath)
-        log.kv("reread.messageCount", written.messageCount)
-        log.kv("reread.lastTimestamp", written.lastTimestamp)
-        log.kv("reread.sizeBytes", written.sizeBytes)
-        return ImportedSession(
-            sourceId = session.id,
-            writtenId = writtenId,
-            projectFolderName = folderName,
-            action = action,
-            displayName = written.displayName,
-            cwd = written.projectPath,
-            messageCount = written.messageCount,
-            fileHistoryFiles = fileHistory.written,
-        )
+            // A subagent run under the auxiliary folder is a transcript of its own, recorded on the same
+            // machine with the same `cwd`, `sessionId` and timestamps: it gets the same rewrite as the
+            // main transcript, or the source user's paths would survive there. Other files are copied as-is,
+            // except in a format 2 archive, where every text file (and every entry name) has its tokens rendered.
+            val auxStats = TranscriptRewriter.Stats()
+            val auxRendered = PathDeanonymizer.Stats()
+            val aux = extractEntries(zip, auxPrefix(session.id), staging.auxDir, rewriter.takeIf { !it.isIdentity }, auxStats, tokens?.deanonymizer, auxRendered)
+            log.kv("aux.filesWritten", aux.written)
+            log.kv("aux.rewrittenTranscripts", aux.rewritten)
+            for ((field, count) in auxStats.changes) log.kv("aux.changed.$field", count)
+            if (tokens != null) logRendered(log, "aux", auxRendered)
+            val historyRendered = PathDeanonymizer.Stats()
+            val fileHistory = extractEntries(
+                zip, fileHistoryPrefix(session.id), staging.fileHistoryDir,
+                deanonymizer = tokens?.deanonymizer, rendered = historyRendered,
+            )
+            log.kv("fileHistory.filesWritten", fileHistory.written)
+            if (tokens != null) logRendered(log, "fileHistory", historyRendered)
+            val discarded = aux.discarded + fileHistory.discarded
+            if (discarded.isNotEmpty()) log.kv("discardedZipSlipEntries", discarded)
+
+            // Everything is built: only now the Claude home is touched. Whatever fails from here on puts
+            // it back as it was.
+            val written = try {
+                if (action == ACTION_REPLACED) {
+                    // Replacing means the local session is gone afterwards, wherever it lived: leaving a
+                    // copy in another project folder would keep two sessions with the same id around.
+                    for (copy in existingCopies) putLocalSessionAside(copy, staging, context.home, log)
+                }
+                staging.publish(staging.transcript, targetFile)
+                staging.publish(staging.auxDir, targetDir.resolve(writtenId))
+                staging.publish(staging.fileHistoryDir, fileHistoryDir.resolve(writtenId))
+                // Re-read from disk: the notification and the diagnosis describe what Claude Code will
+                // actually find, not what this method meant to write.
+                SessionScanner.describe(targetFile, context.home)
+            } catch (e: Throwable) {
+                staging.rollback()
+                throw e
+            }
+            log.kv("reread.cwd", written.projectPath)
+            log.kv("reread.messageCount", written.messageCount)
+            log.kv("reread.lastTimestamp", written.lastTimestamp)
+            log.kv("reread.sizeBytes", written.sizeBytes)
+            ImportedSession(
+                sourceId = session.id,
+                writtenId = writtenId,
+                projectFolderName = folderName,
+                action = action,
+                displayName = written.displayName,
+                cwd = written.projectPath,
+                messageCount = written.messageCount,
+                fileHistoryFiles = fileHistory.written,
+            )
+        }
     }
 
-    /** Removes a local session: its transcript, its auxiliary folder and its file history. */
-    private fun deleteSession(transcript: Path, home: Path, log: ImportLog) {
+    /** Puts a local session (its transcript, its auxiliary folder and its file history) aside; [SessionStaging] deletes it for good once the new one is in. */
+    private fun putLocalSessionAside(transcript: Path, staging: SessionStaging, home: Path, log: ImportLog) {
         val id = transcript.fileName.toString().removeSuffix(".jsonl")
-        Files.deleteIfExists(transcript)
-        deleteRecursively(transcript.resolveSibling(id))
-        deleteRecursively(ClaudePaths.fileHistoryDir(home).resolve(id))
+        staging.setAside(transcript)
+        staging.setAside(transcript.resolveSibling(id))
+        staging.setAside(ClaudePaths.fileHistoryDir(home).resolve(id))
         log.line("replaced: removed the local copy in ${transcript.parent.fileName}")
-    }
-
-    private fun deleteRecursively(dir: Path) {
-        if (!dir.isDirectory()) return
-        Files.walk(dir).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
     }
 
     /** The most recently modified transcript of [projectDir], or `null` when it holds none. */
