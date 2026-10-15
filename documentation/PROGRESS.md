@@ -12,7 +12,7 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 | 2 | IntelliJ sul core condiviso (submodule) | abbandonato | Decisione del 2026-10-15: progetti distinti. Il branch `feature/shared-core` di `ClaudeSessionRecover` (commit `1c09893`, verificato verde) resta senza merge. IntelliJ si chiude con la 1.0.1 di sola sicurezza (`f346048`, preparata in locale). |
 | 3 | Motore di anonimizzazione | fatto | `e84caec`; correzioni dei 19 rilievi di [`REVIEW-WP3.md`](REVIEW-WP3.md) in `6a1b8e3`..`58400a7` (8 commit). 182 test verdi, nessuno saltato. Vedi note WP3 sotto. |
 | 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
-| 5 | Import del formato 2 | fatto, correzioni della review da applicare | `a6605af`. Review Opus: 13 rilievi e lacune nei test in [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) (n. 1: scrittura fuori cartella tramite l'id di sessione). Vedi note WP4/WP5 sotto. |
+| 5 | Import del formato 2 | fatto | `a6605af`; correzioni dei 13 rilievi e delle lacune nei test di [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) in `16e9cd5`..`cc89608` (9 commit). 247 test verdi, nessuno saltato. Vedi note WP4/WP5 sotto. |
 | 6 | CLI | da fare | |
 | 7 | Plugin Claude Code e marketplace | da fare | |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
@@ -40,18 +40,18 @@ proprietario.
 
 ### Ripresa (aggiornato il 2026-10-15, pomeriggio)
 
-WP3 (con le correzioni), WP4 e WP5 fatti; WP2 abbandonato, WP9 annullato. Ordine (sviluppo con Sonnet, review con Opus):
+Core completo (WP1, WP3, WP4, WP5 con le correzioni delle due review); WP2 abbandonato, WP9 annullato.
+Ordine (sviluppo con Sonnet, review con Opus):
 
-1. **Correzioni della review di WP4/WP5** ([`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md), rilievi 1-13 e lacune nei test), con test
-   su archivi costruiti apposta.
-2. **WP6** (CLI), poi **WP7** (plugin Claude Code / Desktop), poi **WP8** (rilascio e documentazione).
+1. **WP6** (CLI, PLAN §2), usando le API elencate in "Correzioni della review WP4/WP5" qui sotto.
+2. **WP7** (plugin Claude Code / Desktop, PLAN §3), poi **WP8** (rilascio e documentazione).
 
 ## Bug trovati nel codice esistente
 
 | Data | Dove | Descrizione | Stato |
 |---|---|---|---|
 | 2026-10-14 | `ClaudeSessionRecover` `SessionArchive.readArchiveManifest` | un archivio prodotto da un altro strumento (export Copilot) faceva fallire l'import con `Parameter specified as non-null is null` | corretto in 0.0.5 |
-| 2026-10-15 | core `SessionArchive.readArchiveManifest` / import (anche IntelliJ 1.0.0) | l'id di sessione e `projectFolderName` del manifest non venivano controllati: un archivio costruito apposta (id `../../../../x`) scriveva file fuori dalla Claude home | IntelliJ: corretto in 1.0.1 (`f346048`, in locale); core: rilievo 1 di `REVIEW-WP4-WP5.md`, da correggere |
+| 2026-10-15 | core `SessionArchive.readArchiveManifest` / import (anche IntelliJ 1.0.0) | l'id di sessione e `projectFolderName` del manifest non venivano controllati: un archivio costruito apposta (id `../../../../x`) scriveva file fuori dalla Claude home | IntelliJ: corretto in 1.0.1 (`f346048`, in locale); core: corretto in `16e9cd5` (`error.unsafeArchive`, `ArchiveSafetyTest`) |
 | 2026-10-14 | `ClaudeSessionRecover` `ClaudeSessionsBundleTest` | i test sul bundle usavano la chiave UI `notification.action.showLog`, quindi non potevano vivere nel core | nel core puntano a `conflict.skip` (WP1) |
 
 ## Note WP1
@@ -162,3 +162,32 @@ Limiti noti:
 - Scostamenti dal piano: `residualUserNameHits == 3` (non 2), perché il branch `users/alice/fix` compare anche nel `gitBranch`
   del manifest (entry `[transcript, manifest.json]`); il vecchio test "tieni la cartella di alice" è diventato il test di target
   obbligatorio; la fixture usa una home POSIX per le radici POSIX. Test da 50 MB: 61 s per export + import, limite 240 s.
+
+### Correzioni della review WP4/WP5 (2026-10-15)
+
+- Sicurezza: `readArchiveManifest` e `import` rifiutano id e nomi di cartella non `[A-Za-z0-9._-]+` (o `.`/`..`) con
+  `IOException` e `error.unsafeArchive`, prima di scrivere; secondo controllo sui percorsi dopo `normalize()`. Prefisso dei token
+  non valido o blocco `anonymization` mancante: `error.unreadableManifest`.
+- Import a stadi: ogni sessione viene preparata in `<home>/.session-porter-staging-*`; con REPLACE la copia vecchia viene
+  messa da parte e ripristinata se lo spostamento fallisce. Una sessione che fallisce non lascia nulla (anche per `OutOfMemoryError`).
+- Identità: `SourceIdentity.detect(..., accountName)` prende come home principale quella che contiene la cartella `.claude`
+  esportata e aggiunge `user.home` come ancora HOME; legge le share WSL (`\\wsl.localhost\...` come `/home/alice`). Nuovi
+  parametri `otherHomes`, `otherNames`; membri `allHomes`, `allUserNames`, `isUserName`. `claudeHome` non viene mai scartato;
+  `sourceOs` viene dai percorsi delle sessioni esportate.
+- Export: UTF-8 con NUL e UTF-16LE/BE con BOM anonimizzati come testo; email e nome git trovati dal redactor sostituiti in ogni
+  entry di testo e nel manifest (`ExportOutcome.identityValuesScrubbed`). Riga finale: taglio sui byte dopo l'ultimo `0x0A`; una
+  riga JSON completa senza `\n` viene tenuta; una sessione senza righe complete viene saltata con `export.warning.emptySession`.
+  ZIP scritto in `.session-porter-*.zip.tmp` accanto alla destinazione e spostato in modo atomico.
+- File oltre 32 MB (`LARGE_FILE_BYTES`): copiati così come sono e scansionati a blocchi (1 MiB, sovrapposizione 4 KB), segnalati
+  come i binari. `ExportOutcome.hasPrivacyFindings` = `residualUserNameHits > 0` o `binaryEntriesWithHits` non vuoto (che ora
+  include anche il nome utente nudo e i file oltre 32 MB): `--strict-privacy` deve fallire su questo.
+- Import: righe accettate solo dal JSON permissivo trattate come testo grezzo da entrambi i lati; CLAUDE_HOME sempre ancora; con
+  DUPLICATE l'id di origine nei percorsi `projects/<cartella>/<id>/` e `file-history/<id>/` diventa quello nuovo; nella tabella
+  il riepilogo mostra il nome del progetto (o `~`) al posto dei token.
+- Motore: nuovi `PathStyle.REL_URL_BACKSLASH` e `REL_URL` (`Users%5Calice`, `users%2Falice`, trovati dal nuovo test di privacy
+  indipendente).
+- Limiti rimasti: email e nome git non sostituiti nei binari e nei file oltre 32 MB (solo ancore e nome utente vengono contati);
+  transcript e aux `.jsonl` elaborati in memoria (troppo grandi per l'heap: "illeggibile" all'export, sessione fallita
+  all'import); la home proprietaria della Claude home si riconosce solo se la cartella si chiama `.claude` e il genitore ha
+  almeno due livelli; `/Users/alice` senza unità non viene letto come home Windows; il rollback dello spostamento è best effort;
+  la riscrittura dell'id con DUPLICATE tocca solo i percorsi `projects/<cartella>/<id>/` e `file-history/<id>/`.
