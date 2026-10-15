@@ -26,6 +26,12 @@ data class SessionInfo(
     val gitBranch: String? = null,
     /** Whether `<home>/file-history/<sessionId>/` - the backups behind checkpoints and `/rewind` - exists. */
     val hasFileHistory: Boolean = false,
+    /**
+     * Name of the project folder (the leaf of its root), written by a format 2 export because
+     * [projectPath] is then an anonymization token that says nothing about the project; `null` for
+     * a local session and for an archive that predates it.
+     */
+    val projectName: String? = null,
 ) {
     val displayName: String
         get() = summary?.takeIf { it.isNotBlank() } ?: id
@@ -96,6 +102,23 @@ data class ExportOutcome(
     val redactedIdentityLines: Int = 0,
     /** `attachment` lines whose own-machine scratch folder path was removed, see [SessionRedactor]. */
     val redactedScratchpadPaths: Int = 0,
+    /** Path anchors replaced by a token, per kind (`HOME`, `ROOT`, `CLAUDE_HOME`), see [PathAnonymizer]. */
+    val replacedByKind: Map<String, Int> = emptyMap(),
+    /** The same replacements per spelling (`win`, `fwd`, `esc1`, `enc`...). */
+    val replacedByStyle: Map<String, Int> = emptyMap(),
+    /**
+     * Whole-word occurrences of the user name that are not part of a path and were therefore left
+     * in the archive (a branch called `users/alice/fix`, a `alice@host`); [residualEntries] names
+     * the archive entries that hold them. Reported, never rewritten.
+     */
+    val residualUserNameHits: Int = 0,
+    val residualEntries: List<String> = emptyList(),
+    /** Binary entries of the archive (copied as they were) in which an anchor was found, by entry name. */
+    val binaryEntriesWithHits: List<String> = emptyList(),
+    /** Transcripts whose last line was still being written and was left out of the archive. */
+    val partialLinesDropped: Int = 0,
+    /** Object keys that two anonymized names would have merged and that kept their original name. */
+    val keyCollisions: Int = 0,
 )
 
 /** Facts about the running IDE the import log records; supplied by `ui/`, which may read them. */

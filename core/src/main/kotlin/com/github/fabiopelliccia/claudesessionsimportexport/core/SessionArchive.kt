@@ -2,22 +2,16 @@ package com.github.fabiopelliccia.claudesessionsimportexport.core
 
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
-import java.io.BufferedOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
-import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
-import java.nio.file.attribute.BasicFileAttributes
 import java.time.Duration
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
-import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 import kotlin.io.path.isDirectory
 import kotlin.io.path.isRegularFile
 
@@ -35,26 +29,38 @@ import kotlin.io.path.isRegularFile
  * ```
  *
  * The archive is self-describing: an entry that is missing is handled by its absence, never by the
- * format number, which only exists to refuse a layout this build cannot understand. On import only
- * the machine facing fields of the transcript are rewritten - see [TranscriptRewriter]; everything
- * else, in particular the conversation itself, is copied completely untouched.
+ * format number, which only exists to refuse a layout this build cannot understand.
  *
  * Every `.jsonl` file the export writes - the main transcript and any subagent transcript under the
  * auxiliary folder - is first passed through [SessionRedactor], which removes the exporting user's
  * own account email, git identity and Claude Code scratch folder path: the archive itself never
  * carries them, regardless of who ends up reading it or whether it is ever imported at all.
+ *
+ * **Format 2** (the only one written since 2.0.0) is then anonymized: every path anchor that names
+ * the exporting user - the session's project root, the Claude home, the user's home, in any of the
+ * spellings [PathAnonymizer] knows - is replaced by a typed token, in the transcripts (string values
+ * and object keys alike), in the other text files of the session, in the ZIP entry names and in the
+ * manifest; binary files are copied as they were and only scanned. The manifest records the token
+ * prefix and the source operating system in its `anonymization` block. Format 1 archives (no tokens,
+ * the source machine's own paths) are still read.
  */
 object SessionArchive {
 
     const val ARCHIVE_EXTENSION = "zip"
-    const val FORMAT_VERSION = 1
+    const val FORMAT_VERSION = 2
+
+    /** First format whose paths are anonymization tokens: it needs a target folder on import. */
+    const val ANONYMIZED_FORMAT = 2
     const val PRODUCER = PluginNames.DISPLAY_NAME
-    private const val MANIFEST_ENTRY = "manifest.json"
+    private const val ANONYMIZATION_SCHEME = 1
+    internal const val MANIFEST_ENTRY = "manifest.json"
     private const val ACTION_NEW = "new"
     private const val ACTION_REPLACED = "replaced"
     private const val ACTION_DUPLICATED = "duplicated"
 
     private val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
+
+    internal fun toJson(manifest: ArchiveManifest): String = gson.toJson(manifest)
 
     data class ArchiveManifest(
         val formatVersion: Int,
@@ -72,91 +78,52 @@ object SessionArchive {
         val producerComponent: String? = null,
         /** Version of [producerComponent]; absent in archives that predate it. */
         val producerVersion: String? = null,
-    )
+        /** How the paths of a format 2 archive were anonymized; absent in format 1. */
+        val anonymization: AnonymizationInfo? = null,
+    ) {
+        /** Whether the paths of the archive are tokens (format 2) rather than the source machine's own. */
+        val isAnonymized: Boolean get() = formatVersion >= ANONYMIZED_FORMAT
+    }
 
-    private fun transcriptEntry(id: String) = "sessions/$id/transcript.jsonl"
-    private fun auxPrefix(id: String) = "sessions/$id/aux/"
-    private fun fileHistoryPrefix(id: String) = "sessions/$id/file-history/"
+    /**
+     * The `anonymization` block of the manifest. All fields have defaults so Gson, which then calls the
+     * generated no-argument constructor, fills a missing one instead of leaving it `null`.
+     */
+    data class AnonymizationInfo(
+        /** Version of the token grammar, see [PathTokens]. */
+        val scheme: Int = ANONYMIZATION_SCHEME,
+        /** Prefix of every token (`SP`, or a nonce when the source already held `{{SP`). */
+        val tokenPrefix: String = PathTokens.DEFAULT_PREFIX,
+        /** The anchor kinds that were replaced at least once. */
+        val kinds: List<String> = emptyList(),
+        /** `windows` or `posix`: the operating system the paths were written on. */
+        val sourceOs: String = "windows",
+    ) {
+        /** [sourceOs] as a [PathOs]; Windows when it is not recognised. */
+        val os: PathOs get() = if (sourceOs.equals("posix", ignoreCase = true)) PathOs.POSIX else PathOs.WINDOWS
+    }
+
+    internal fun transcriptEntry(id: String) = "sessions/$id/transcript.jsonl"
+    internal fun auxPrefix(id: String) = "sessions/$id/aux/"
+    internal fun fileHistoryPrefix(id: String) = "sessions/$id/file-history/"
 
     // ------------------------------------------------------------------------------- export --
 
+    /**
+     * Writes [sessions] to [destination] as a format 2 archive, see the class doc and
+     * [SessionExporter]. [identity] names the anchors to anonymize (the user's home, the Claude home,
+     * the 8.3 spellings, the user name); by default it is read from the running machine, with [home]
+     * as the Claude home - tests and tools that export on behalf of another account pass their own.
+     * Each session adds its own project root to it.
+     */
     fun export(
         sessions: List<SessionInfo>,
         destination: Path,
         home: Path = ClaudePaths.resolveHome(),
         progress: TransferProgress = TransferProgress.NOOP,
         producer: ProducerInfo = ProducerInfo(),
-    ): ExportOutcome {
-        val projectsDir = ClaudePaths.projectsDir(home)
-        val warnings = mutableListOf<String>()
-        val exported = mutableListOf<SessionInfo>()
-        var unreadable = 0
-        val redaction = SessionRedactor.Stats()
-
-        Files.createDirectories(destination.toAbsolutePath().parent)
-        ZipOutputStream(BufferedOutputStream(Files.newOutputStream(destination))).use { zip ->
-            sessions.forEachIndexed { index, session ->
-                progress.report(
-                    index.toDouble() / sessions.size,
-                    ClaudeSessionsBundle.message("progress.exportingSession", session.displayName),
-                )
-
-                val projectDir = projectsDir.resolve(session.projectFolderName)
-                val transcript = projectDir.resolve("${session.id}.jsonl")
-                if (!transcript.isRegularFile()) {
-                    warnings += ClaudeSessionsBundle.message("export.warning.noTranscript", session.displayName)
-                    return@forEachIndexed
-                }
-                // Read, redact and re-encode before the entry is opened: a file that fails half way
-                // must not leave a truncated transcript in the archive.
-                val bytes = try {
-                    SessionRedactor.redact(Files.readString(transcript, StandardCharsets.UTF_8), redaction)
-                        .toByteArray(StandardCharsets.UTF_8)
-                } catch (e: IOException) {
-                    unreadable++
-                    warnings += ClaudeSessionsBundle.message("export.warning.unreadable", session.displayName, transcript)
-                    return@forEachIndexed
-                }
-                writeEntry(zip, transcriptEntry(session.id), bytes)
-
-                val auxDir = projectDir.resolve(session.id)
-                if (auxDir.isDirectory()) {
-                    // A subagent run under here is a transcript of its own, in the same format, and
-                    // gets the same redaction pass; other files (tool results, ...) are copied as-is.
-                    unreadable += copyDirectoryToZip(auxDir, auxPrefix(session.id), zip, redaction) { file ->
-                        warnings += ClaudeSessionsBundle.message("export.warning.unreadable", session.displayName, file)
-                    }
-                }
-                val fileHistoryDir = ClaudePaths.fileHistoryDir(home).resolve(session.id)
-                if (fileHistoryDir.isDirectory()) {
-                    // Raw backups of the user's own files, never a transcript: never redacted.
-                    unreadable += copyDirectoryToZip(fileHistoryDir, fileHistoryPrefix(session.id), zip, redaction = null) { file ->
-                        warnings += ClaudeSessionsBundle.message("export.warning.unreadable", session.displayName, file)
-                    }
-                }
-                exported += session.copy(hasAuxData = auxDir.isDirectory(), hasFileHistory = fileHistoryDir.isDirectory())
-            }
-
-            // Written last, so it lists exactly the sessions that made it into the archive.
-            val manifest = ArchiveManifest(
-                formatVersion = FORMAT_VERSION,
-                exportedAt = Instant.now().toString(),
-                producer = PRODUCER,
-                sessions = exported,
-                producerComponent = producer.component,
-                producerVersion = producer.version,
-            )
-            writeEntry(zip, MANIFEST_ENTRY, gson.toJson(manifest).toByteArray(StandardCharsets.UTF_8))
-            progress.report(1.0, ClaudeSessionsBundle.message("progress.exportCompleted"))
-        }
-        return ExportOutcome(
-            exportedCount = exported.size,
-            warnings = warnings,
-            unreadableFiles = unreadable,
-            redactedIdentityLines = redaction.redactedIdentityLines,
-            redactedScratchpadPaths = redaction.redactedScratchpadPaths,
-        )
-    }
+        identity: SourceIdentity = SourceIdentity.detect(home),
+    ): ExportOutcome = SessionExporter(sessions, destination, home, progress, producer, identity).run()
 
     // ----------------------------------------------------------------------------- manifest --
 
@@ -172,6 +139,10 @@ object SessionArchive {
                 ?: throw IOException(ClaudeSessionsBundle.message("error.unreadableManifest"))
             if (manifest.formatVersion > FORMAT_VERSION) {
                 throw IOException(ClaudeSessionsBundle.message("error.archiveTooNew", manifest.formatVersion, FORMAT_VERSION))
+            }
+            // A format 2 archive without its token description cannot be rendered for another machine.
+            if (manifest.isAnonymized && manifest.anonymization == null) {
+                throw IOException(ClaudeSessionsBundle.message("error.unreadableManifest"))
             }
             // Gson fills a field missing from the JSON with null even when Kotlin declares it
             // non-null: an archive without a session list is read as an empty one.
@@ -471,57 +442,6 @@ object SessionArchive {
     private fun resolveSafely(base: Path, relative: String): Path? {
         val resolved = base.resolve(relative).normalize()
         return if (resolved.startsWith(base.normalize())) resolved else null
-    }
-
-    /**
-     * Copies every file of [dir] below [entryPrefix]; a file that cannot be read is reported to
-     * [onUnreadable] and left out instead of aborting the export. Returns how many were left out.
-     *
-     * [redaction] is non-`null` only for the auxiliary folder, whose `.jsonl` files (subagent runs)
-     * are transcripts in the same sense as the session's own and go through [SessionRedactor] too;
-     * every other file - and the whole of the file history folder, raw backups of the user's own
-     * files - is copied byte for byte.
-     */
-    private fun copyDirectoryToZip(
-        dir: Path,
-        entryPrefix: String,
-        zip: ZipOutputStream,
-        redaction: SessionRedactor.Stats?,
-        onUnreadable: (Path) -> Unit,
-    ): Int {
-        var unreadable = 0
-        Files.walkFileTree(dir, object : SimpleFileVisitor<Path>() {
-            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                if (!attrs.isRegularFile) return FileVisitResult.CONTINUE
-                val bytes = try {
-                    if (redaction != null && file.fileName.toString().endsWith(".jsonl", ignoreCase = true)) {
-                        SessionRedactor.redact(Files.readString(file, StandardCharsets.UTF_8), redaction)
-                            .toByteArray(StandardCharsets.UTF_8)
-                    } else {
-                        Files.readAllBytes(file)
-                    }
-                } catch (e: IOException) {
-                    unreadable++
-                    onUnreadable(file)
-                    return FileVisitResult.CONTINUE
-                }
-                writeEntry(zip, entryPrefix + dir.relativize(file).toString().replace('\\', '/'), bytes)
-                return FileVisitResult.CONTINUE
-            }
-
-            override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult {
-                unreadable++
-                onUnreadable(file)
-                return FileVisitResult.CONTINUE
-            }
-        })
-        return unreadable
-    }
-
-    private fun writeEntry(zip: ZipOutputStream, name: String, content: ByteArray) {
-        zip.putNextEntry(ZipEntry(name))
-        zip.write(content)
-        zip.closeEntry()
     }
 
     // ---------------------------------------------------------------------------------- log --
