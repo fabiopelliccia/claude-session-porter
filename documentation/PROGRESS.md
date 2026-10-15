@@ -9,10 +9,10 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 |---|---|---|---|
 | 0 | Scheletro del repository | fatto | `09e6e2b`. Wrapper 9.7.1, `settings.gradle.kts` radice con solo `includeBuild("core")` (`:cli` lo aggiunge il WP6), CI `./gradlew -p core build`. |
 | 1 | Spostamento del core e split dei bundle | fatto | `5071f52`. 79 test verdi (`./gradlew -p core build` e `./gradlew build`). Vedi note WP1 sotto. |
-| 2 | IntelliJ sul core condiviso (submodule) | da verificare | `ClaudeSessionRecover`, branch `feature/shared-core`, commit `1c09893` (submodule su `7086d36`). Interrotto mentre girava `verifyPlugin`: rifare `clean test buildPlugin verifyPlugin`, controllare che lo ZIP abbia in `lib/` core e Gson ma non `kotlin-stdlib`. |
-| 3 | Motore di anonimizzazione | fatto, review da rifare | `e84caec`. 126 test verdi (79 + 47 nuovi). Non collegato a `SessionArchive`. Vedi note WP3 sotto. La review Opus del motore è stata interrotta prima di produrre risultati. |
-| 4 | Export e manifest formato 2 | iniziato | Interrotto prima di modificare il codice. Unico prodotto, non committato: `core/src/test/resources/fixtures/format1-alice.zip` (archivio formato 1 per il test di compatibilità; da controllare che sia stato generato dal codice formato 1 attuale prima di usarlo). |
-| 5 | Import del formato 2 | da fare | |
+| 2 | IntelliJ sul core condiviso (submodule) | fatto | `ClaudeSessionRecover`, branch `feature/shared-core`, commit `1c09893` (submodule su `7086d36`). Verifica del 2026-10-15: `clean test buildPlugin verifyPlugin` verde (5 test, ripresi dalla cache di Gradle), `verifyPlugin` Compatible su IU-261.27258.48, IU-262.10968.63, IU-263.5153.40; `lib/` dello ZIP con core 2.0.0 e Gson 2.11.0, senza `kotlin-stdlib`. Senza merge né push. |
+| 3 | Motore di anonimizzazione | fatto, correzioni della review da applicare | `e84caec`. 126 test verdi (79 + 47 nuovi). Review Opus del 2026-10-15: 18 rilievi in [`REVIEW-WP3.md`](REVIEW-WP3.md), più il n. 19 (conteggio residuo con utente `root`/`home`) emerso nel WP5. Vedi note WP3 sotto. |
+| 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
+| 5 | Import del formato 2 | fatto | `a6605af`. 147 test, 0 falliti, 1 saltato (rilievo n. 19 della review WP3). Vedi note WP4/WP5 sotto. |
 | 6 | CLI | da fare | |
 | 7 | Plugin Claude Code e marketplace | da fare | |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
@@ -31,19 +31,18 @@ proprietario.
 
 1. Leggere questo file e `PLAN.md`.
 2. Build su Windows (fuori dal sandbox):
-   `$env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$PWD\build\uds"; .\gradlew.bat build`
+   `$env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$PWD\build\uds"; .\gradlew.bat -p core build`
+   (il `build` della radice esegue solo `buildEnvironment`: nessun task delega alla build inclusa; la CI usa `-p core build`).
 3. Riprendere dal primo WP non "fatto".
 
-### Ripresa dopo l'interruzione del 2026-10-14 sera
+### Ripresa (aggiornato il 2026-10-15)
 
-Ordine consigliato (sviluppo con Sonnet, review con Opus, come da CLAUDE.md):
+WP2, WP4 e WP5 fatti; review del WP3 fatta. Ordine (sviluppo con Sonnet, review con Opus, come da CLAUDE.md):
 
-1. **WP4 + WP5** in `ClaudeSessionPorter` (`develops`): rilanciare lo sviluppatore con il brief di PLAN §4.2, §4.3 e §4.5.
-2. In parallelo, **review del WP3** in sola lettura (ricerca di input in cui la home o il nome utente sopravvivono:
-   `\\?\C:\...`, UNC, `file:/C:/`, `\u005c`, OneDrive, maiuscole/minuscole, metacaratteri regex nella radice, pre-filtro).
-   Le correzioni si applicano dopo il WP4/WP5, per non toccare gli stessi file in due.
-3. **WP2**: rifare la verifica sul branch `feature/shared-core` di `ClaudeSessionRecover`; il submodule andrà
-   aggiornato all'ultimo commit di `develops` di questo repository prima del WP9.
+1. **Correzioni della review del WP3** ([`REVIEW-WP3.md`](REVIEW-WP3.md), rilievi 1-19), con un test per ciascuna; togliere
+   l'`@Ignore` del rilievo 19 in `CrossMachineTransferTest`.
+2. In parallelo, **review del WP4/WP5** in sola lettura (`SessionExporter`, `SessionArchive`, `PathMapper`, `ImportDiagnostics`).
+3. Prima del WP9: aggiornare il submodule di `ClaudeSessionRecover` all'ultimo commit di `develops`.
 4. Poi WP6 (CLI), WP7 (plugin), WP8, WP9.
 
 ## Bug trovati nel codice esistente
@@ -117,3 +116,24 @@ Limiti noti:
 - La conversione dei separatori della coda è euristica: in testo libero un `\n` letterale dopo un percorso Windows verso POSIX diventa `/n`. Il nome utente fuori dai
   percorsi è solo contato (`residualUserNameHits`).
 - Un file di testo JSON (per esempio `.meta.json`) va con `anonymizeText`: i suoi percorsi sono `esc1` e tornano `esc1`, quindi coerenti.
+
+## Note WP4/WP5
+
+- Export in `SessionExporter.kt` (interno), chiamato da `SessionArchive.export(..., identity: SourceIdentity = SourceIdentity.detect(home))`.
+  Un `PathAnonymizer` per sessione, con la sola radice di quella sessione. Nomi delle entry dello ZIP anonimizzati; se due nomi
+  coincidono, il secondo prende il suffisso `~2` (verificato solo su file system case-sensitive). `choosePrefix` controlla anche
+  le stringhe e le chiavi decodificate (un `{{SP` letterale forza il nonce).
+- Manifest v2: `sourceHome` assente; `projectPath`, `projectFolderName` e `summary` sono token grezzi (`{{SP:ROOT:win}}`), quindi
+  le tabelle devono mostrare `projectName` (null per sessioni locali, archivi vecchi e radice uguale alla home). Il `summary` può
+  contenere un token se il titolo cita un percorso. `ArchiveManifest.anonymization` = `AnonymizationInfo(scheme, tokenPrefix, kinds, sourceOs)`
+  con `.os`; `kinds` elenca solo i tipi sostituiti; `isAnonymized` vero per il formato 2; `SessionArchive.ANONYMIZED_FORMAT = 2`.
+- `ExportOutcome`: `replacedByKind`, `replacedByStyle`, `residualUserNameHits`, `residualEntries`, `binaryEntriesWithHits`,
+  `partialLinesDropped`, `keyCollisions`. Riga finale parziale (anche negli aux `.jsonl`) scartata con `export.warning.partialLine` (10 lingue).
+- Import: `import(..., userHome: String = user.home)`; il formato 2 richiede `targetProjectPath` (`error.targetRequired`, 10 lingue,
+  niente scritto prima). `PathMapper(sourceRoots, target, extraFileAnchors)`, con il costruttore `(sourceRoot, target)` tenuto per il
+  formato 1. Il deanonimizzatore passa anche sui nomi delle entry prima di costruire i percorsi. Controllo n. 14 (`CHECK_COUNT = 14`):
+  nomi dei file e conteggi, mai il contenuto. `ImportDiagnostics.Target` ha il nuovo parametro `tokenPrefix`. Il log registra
+  `manifest.anonymization` e i token resi per parte.
+- Scostamenti dal piano: `residualUserNameHits == 3` (non 2), perché il branch `users/alice/fix` compare anche nel `gitBranch`
+  del manifest (entry `[transcript, manifest.json]`); il vecchio test "tieni la cartella di alice" è diventato il test di target
+  obbligatorio; la fixture usa una home POSIX per le radici POSIX. Test da 50 MB: 61 s per export + import, limite 240 s.
