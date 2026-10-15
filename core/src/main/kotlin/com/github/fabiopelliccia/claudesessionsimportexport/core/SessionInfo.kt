@@ -117,7 +117,7 @@ data class ExportOutcome(
     val binaryEntriesWithHits: List<String> = emptyList(),
     /** Transcripts whose last line was still being written and was left out of the archive. */
     val partialLinesDropped: Int = 0,
-    /** Object keys that two anonymized names would have merged and that kept their original name. */
+    /** Object keys that two anonymized names would have merged: the later one got a `~2`-style counter, never its original name. */
     val keyCollisions: Int = 0,
 )
 

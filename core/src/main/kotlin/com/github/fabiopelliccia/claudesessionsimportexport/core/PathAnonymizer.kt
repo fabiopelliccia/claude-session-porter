@@ -10,9 +10,13 @@ import java.util.regex.Pattern
  * Matching is case-insensitive, per anchor and per style, the longest anchor first: a project root
  * below the home wins over the home, and `C--Users-alice-IdeaProjects-X` is `{{SP:ROOT:enc}}` when X
  * is the root but `{{SP:HOME:enc}}-Other` for any other folder. Boundaries keep `alice2`,
- * `alice.bak` and `ALICE~1` from being read as `alice`; see [AnchorMatcher] for the exact rules.
+ * `alice.bak` and `alice-admin` from being read as `alice`; see [AnchorMatcher] for the exact rules.
  * What follows an anchor is left as it was, so `C:\Users\alice\note.txt` becomes
  * `{{SP:HOME:win}}\note.txt`.
+ *
+ * Privacy wins over tidiness: an anchor of two or more folders is replaced wherever it appears, even
+ * inside a longer path (`/var/home/alice`), and a name is looked for in every spelling a tool writes it
+ * in (see [PathNamePatterns]). What is not found stays and is counted by the residual check.
  *
  * **Escaping levels.** The anonymizer never decodes anything itself, it matches the text it is given
  * and names the level it finds: `win` has one backslash per separator, `esc1` two, `esc2` four.

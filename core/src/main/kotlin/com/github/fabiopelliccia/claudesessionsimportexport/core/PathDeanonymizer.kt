@@ -26,6 +26,11 @@ package com.github.fabiopelliccia.claudesessionsimportexport.core
  * Windows source and destination the tail is left untouched. A `fwd` token of a Windows source
  * (`C:/Users/alice`, a URI) stays forward-slashed.
  *
+ * Three more things keep a path usable when the operating system changes: inside a `file:` URI the
+ * path is written with forward slashes only and a drive letter or a POSIX path follows three slashes; the
+ * extended-length prefix `\\?\` is dropped for a POSIX destination; and a destination that is a root
+ * (`D:\`, `/`) swallows the separator that follows the token, so it is not doubled.
+ *
  * Like the anonymizer, [deanonymizeJsonLine] works on decoded strings and keys and [deanonymizeText]
  * on the text as it is; the escaping of what it writes is the caller's text level, so on a JSON line
  * everything is re-encoded by the serializer.
