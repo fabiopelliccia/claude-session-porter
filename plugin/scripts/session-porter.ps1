@@ -137,5 +137,23 @@ $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $Utf8NoBom
 $OutputEncoding = $Utf8NoBom
 
-& $Java '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -jar (Resolve-Path -LiteralPath $Jar).Path @CliArguments
+$JarPath = (Resolve-Path -LiteralPath $Jar).Path
+$JavaOptions = '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8'
+
+# java.exe receives its command line in the ANSI code page: a path with a character outside it (a Greek letter, a
+# Japanese folder name) arrives damaged, a ? or * in what is left is expanded as a wildcard, and PowerShell 5.1 drops
+# an empty argument. Environment variables are Unicode, so the arguments go to the CLI in SESSION_PORTER_ARGS, one per
+# line, and the CLI reads them from there when it is started without arguments. The plain command line is used for
+# what does not fit: an argument with a line break in it, or more text than an environment variable holds.
+$Packed = ''
+foreach ($Argument in $CliArguments) { $Packed += $Argument + "`n" }
+$FitsInEnvironment = ($CliArguments.Count -gt 0) -and ($Packed.Length -le 30000) -and -not ($CliArguments | Where-Object { $_.Contains("`n") })
+
+if ($FitsInEnvironment) {
+    $env:SESSION_PORTER_ARGS = $Packed
+    & $Java @JavaOptions -jar $JarPath
+} else {
+    Remove-Item Env:SESSION_PORTER_ARGS -ErrorAction SilentlyContinue
+    & $Java @JavaOptions -jar $JarPath @CliArguments
+}
 exit $LASTEXITCODE

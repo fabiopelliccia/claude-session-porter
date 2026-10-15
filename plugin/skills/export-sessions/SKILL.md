@@ -31,8 +31,12 @@ quoted path.
 - Standard output is exactly one JSON document: `{"ok":…,"command":…,"data":…,"warnings":[…],"error":null|{"code","message"}}`.
   Read the **exit code first**, then `error.code`, then `data`. Standard error is empty unless something is wrong.
 - Exit codes: 0 done, 2 wrong use (see `error.message`), 3 invalid archive, 4 environment or I/O problem,
-  5 partly done (`data` is still filled in), 6 privacy check failed, 10 internal error, **20 Java not found,
+  5 partly done (`data` is still filled in), 6 privacy check failed, 10 internal error (`error.code`
+  `outOfMemory`: the sessions are too big for the memory Java was given, so export fewer at a time),
+  130 the command was interrupted (nothing is left behind, just run it again), **20 Java not found,
   21 Java older than 21**.
+- Paths and values may hold any character, accents and non-Latin letters included: the launcher hands them
+  over safely. An empty value (`--out ""`) is an error, never "the current folder".
 - Exit 20 or 21: stop. Tell the user that Session Porter needs Java 21 or later, show the install hint that
   fits their system from `data.installHints`, and say they can run the skill again afterwards. Never install
   Java yourself.

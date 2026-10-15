@@ -173,5 +173,26 @@ if command -v cygpath >/dev/null 2>&1; then
     jar=$(cygpath -m "$jar")
 fi
 
+# On Windows java.exe receives its command line in the ANSI code page: a path with a character outside it
+# (a Greek letter, a Japanese folder name) arrives damaged, and a ? or * in what is left is expanded as a
+# wildcard. Environment variables are Unicode, so the arguments go to the CLI in SESSION_PORTER_ARGS, one per
+# line, and the CLI reads them from there when it is started without arguments. The plain command line is used
+# for what does not fit: an argument with a line break in it, or more text than an environment variable holds.
+newline='
+'
+packed=""
+for arg in "$@"; do
+    case "$arg" in
+        *"$newline"*) packed=""; break ;;
+    esac
+    packed="$packed$arg$newline"
+done
+
 # exec keeps standard input, standard output and the exit code of the CLI as they are.
+if [ "$#" -gt 0 ] && [ -n "$packed" ] && [ "${#packed}" -le 30000 ]; then
+    SESSION_PORTER_ARGS=$packed
+    export SESSION_PORTER_ARGS
+    exec "$java" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "$jar"
+fi
+unset SESSION_PORTER_ARGS
 exec "$java" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "$jar" "$@"

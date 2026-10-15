@@ -78,7 +78,7 @@ make_fake_java() {   # make_fake_java <folder> <version>
 #!/bin/sh
 case "\$*" in
     *-XshowSettings*) echo "    java.specification.version = $2" >&2 ;;
-    *) echo "FAKE-JAVA \$*" ;;
+    *) echo "FAKE-JAVA \$*"; printf 'ARGS=%s\n' "\$(printf '%s' "\$SESSION_PORTER_ARGS" | tr '\n' '|')" ;;
 esac
 EOF
     chmod +x "$1/java"
@@ -156,7 +156,9 @@ launcher_tests() {
         out=$(no_java_env /usr/bin env SESSION_PORTER_JAVA="$scratch/fake-java-17/java" JAVA_HOME="$scratch/fake-java-21-home" sh "$plugin/scripts/session-porter" list --json "two words"); code=$?
         expect_exit "old Java first, JAVA_HOME has 21" 0 $code
         expect_json "launch line" "$out" 'FAKE-JAVA -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar'
-        expect_json "launch line" "$out" 'session-porter.jar list --json two words'
+        # The arguments do not go on the command line of java but in SESSION_PORTER_ARGS, one per line.
+        expect_json "arguments in the environment" "$out" 'ARGS=list|--json|two words|'
+        contains "$out" "jar list"; [ $? -ne 0 ]; check "no argument on the java command line" $?
     elif [ "$on_windows" = yes ]; then
         old="$scratch/fake-java-17.cmd"
         printf '@echo off\r\necho     java.specification.version = 17 1>&2\r\n' > "$old"
@@ -216,6 +218,23 @@ cycle_tests() {
     expect_exit "list" 0 $code
     expect_json "list" "$out" '"totalMatching":6'
     expect_json "list keeps accents" "$out" 'Verifica caffè già fatto'
+
+    # Arguments that the ANSI command line of java.exe on Windows would damage: a character outside the code page,
+    # an empty value, a wildcard that would be expanded against the files of the current folder (this one has u.zip).
+    unicode_home=$base/psΩ日本home/.claude
+    make_source_home "$unicode_home"
+    out=$(sp list --json --home "$(native "$unicode_home")"); code=$?
+    expect_exit "home with characters outside the ANSI code page" 0 $code
+    expect_json "unicode home" "$out" '"totalMatching":6'
+    expect_json "unicode home is reported as it is" "$out" 'psΩ日本home'
+    out=$(sp list --json --home ""); code=$?
+    expect_exit "empty --home" 2 $code
+    expect_json "empty --home" "$out" '"code":"invalidPath"'
+    : > "$scratch/u.zip"
+    out=$(sp list --json --home "$h1" --since 'u*'); code=$?
+    expect_exit "--since with a wildcard" 2 $code
+    expect_json "the wildcard stays as typed" "$out" 'u*'
+    rm -f "$scratch/u.zip"
 
     # Export one session, ids on the command line.
     out=$(sp export --json --home "$h1" --log-dir "$logs" --ids "$ids_1" --out "$(native "$base/out")/one.zip"); code=$?
