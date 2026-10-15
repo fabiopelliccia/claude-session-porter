@@ -60,6 +60,12 @@ object SessionArchive {
 
     private val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
 
+    /** What a session id (and a format 1 folder name) may be made of: nothing that can climb a path or name a drive. */
+    private val PLAIN_NAME = Regex("[A-Za-z0-9._-]+")
+
+    /** A folder name of a format 2 archive may also be a token such as `{{SP:ROOT:enc}}`, which is never used as a path. */
+    private val PLAIN_OR_TOKEN_NAME = Regex("[A-Za-z0-9._{}:~-]+")
+
     internal fun toJson(manifest: ArchiveManifest): String = gson.toJson(manifest)
 
     data class ArchiveManifest(
@@ -140,8 +146,9 @@ object SessionArchive {
             if (manifest.formatVersion > FORMAT_VERSION) {
                 throw IOException(ClaudeSessionsBundle.message("error.archiveTooNew", manifest.formatVersion, FORMAT_VERSION))
             }
-            // A format 2 archive without its token description cannot be rendered for another machine.
-            if (manifest.isAnonymized && manifest.anonymization == null) {
+            // A format 2 archive without its token description, or with a prefix no token can be spelled
+            // with, cannot be rendered for another machine.
+            if (manifest.isAnonymized && !hasUsableAnonymization(manifest)) {
                 throw IOException(ClaudeSessionsBundle.message("error.unreadableManifest"))
             }
             // Gson fills a field missing from the JSON with null even when Kotlin declares it
@@ -154,9 +161,16 @@ object SessionArchive {
             return manifest.copy(
                 sessions = sessions
                     .map { requireClaudeSession(it, manifest.producer) }
+                    .map { session -> requireSafeNames(session, manifest.isAnonymized) }
                     .map { session -> session.copy(summary = titleOf(zip, session)) },
             )
         }
+    }
+
+    /** The block must be there and its prefix must be one a token can be spelled with (Gson may leave it `null`). */
+    private fun hasUsableAnonymization(manifest: ArchiveManifest): Boolean {
+        val info = manifest.anonymization ?: return false
+        return PathTokens.isValidPrefix(info.tokenPrefix)
     }
 
     /**
@@ -171,6 +185,35 @@ object SessionArchive {
             throw IOException(ClaudeSessionsBundle.message("error.notClaudeArchive", producer ?: "?"))
         }
         return session
+    }
+
+    /**
+     * The id of a session names its files (`<id>.jsonl`, `<id>/`, `file-history/<id>/`) and so does its
+     * folder name in a format 1 archive, so a manifest written by hand could point them anywhere:
+     * `../../../../x`, `C:\x`, `/etc/x`. Only the characters of a plain file name are accepted, and
+     * never a name made of dots only. Where an anonymized archive keeps a token instead of a folder
+     * name (`{{SP:ROOT:enc}}`, never used as a path there) the characters of a token are accepted too.
+     * The archive is refused as a whole: it was not made by this tool.
+     */
+    private fun requireSafeNames(session: SessionInfo, isAnonymized: Boolean): SessionInfo {
+        val folderPattern = if (isAnonymized) PLAIN_OR_TOKEN_NAME else PLAIN_NAME
+        val safe = isPlainName(session.id, PLAIN_NAME) && isPlainName(session.projectFolderName, folderPattern)
+        if (!safe) throw IOException(ClaudeSessionsBundle.message("error.unsafeArchive"))
+        return session
+    }
+
+    private fun isPlainName(name: String, pattern: Regex): Boolean = pattern.matches(name) && name.any { it != '.' }
+
+    /**
+     * Fails unless [path] lies strictly below [base] once both are normalized: the last line of defence
+     * of the import, after [requireSafeNames], for every place a session writes to.
+     */
+    internal fun requireInside(base: Path, path: Path) {
+        val normalizedBase = base.toAbsolutePath().normalize()
+        val normalized = path.toAbsolutePath().normalize()
+        if (normalized == normalizedBase || !normalized.startsWith(normalizedBase)) {
+            throw IOException(ClaudeSessionsBundle.message("error.unsafeArchive"))
+        }
     }
 
     private fun titleOf(zip: ZipFile, session: SessionInfo): String? {
@@ -327,6 +370,12 @@ object SessionArchive {
         }
         log.kv("action", action)
         log.kv("writtenId", writtenId)
+
+        // Whatever the manifest said, nothing is written (or replaced) outside the two folders Claude Code owns.
+        val fileHistoryDir = ClaudePaths.fileHistoryDir(context.home)
+        requireInside(projectsDir, targetDir.resolve("$writtenId.jsonl"))
+        requireInside(projectsDir, targetDir.resolve(writtenId))
+        requireInside(fileHistoryDir, fileHistoryDir.resolve(writtenId))
 
         if (action == ACTION_REPLACED) {
             // Replacing means the local session is gone afterwards, wherever it lived: leaving a

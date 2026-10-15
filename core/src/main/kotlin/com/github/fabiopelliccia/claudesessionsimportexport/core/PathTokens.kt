@@ -139,6 +139,9 @@ object PathTokens {
     }
 
     fun requireValidPrefix(prefix: String) {
-        require(PREFIX_SHAPE.matches(prefix)) { "Invalid token prefix: $prefix" }
+        require(isValidPrefix(prefix)) { "Invalid token prefix: $prefix" }
     }
+
+    /** Whether [prefix] has the shape of a prefix: a letter, then letters and digits. `null` (an archive that says nothing) is not one. */
+    fun isValidPrefix(prefix: String?): Boolean = prefix != null && PREFIX_SHAPE.matches(prefix)
 }
