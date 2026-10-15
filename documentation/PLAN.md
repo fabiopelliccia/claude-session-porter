@@ -10,9 +10,9 @@ Technical spec for the developers. Progress, decisions and open issues are track
 - Runtime: a **Java 21 CLI fat jar** built from the shared Kotlin `core`.
 - **Export and import.**
 - This repo is **independent of IntelliJ** (no IntelliJ Platform Gradle plugin here).
-- `core` lives **only here** and the IntelliJ plugin (`C:\Users\pelliccia\IdeaProjects\ClaudeSessionRecover`)
-  consumes it through a **git submodule + `includeBuild`** (for now the submodule URL is the local path
-  of this repo; it becomes the GitHub URL at publication).
+- `core` lives **only here**. **Superseded 2026-10-15:** the IntelliJ plugin (`C:\Users\pelliccia\IdeaProjects\ClaudeSessionRecover`)
+  is a separate, finished project: it ends with the security release 1.0.1 and does **not** consume this core (no
+  submodule, no 1.1.0). The IntelliJ parts of §1 and §4.4 and WP2/WP9 are dropped; 1.0.x refuses format 2 cleanly.
 - **Full anonymization**: the archive carries no reference to the exporting user's home/folders in any
   form, conversation text included; the import maps them onto the destination.
 - Stop at **local tests**: no GitHub repo creation, no push, no release without the owner.
@@ -34,6 +34,9 @@ Technical spec for the developers. Progress, decisions and open issues are track
 - Plugin facts (official docs, code.claude.com): see "Claude Code plugin facts" below.
 
 ## 1. Sharing core
+
+> 2026-10-15: the IntelliJ bullets below (submodule, `UiBundle`, `PluginNamesTest`, ZIP acceptance) are dropped; the
+> core build, bundle split, `ProducerInfo` and `LogFiles` stay as done in WP1.
 
 - `core/` is a **standalone Gradle build** (`core/settings.gradle.kts`: `rootProject.name = "session-porter-core"`).
 - `core/build.gradle.kts`: kotlin jvm 2.3.21, `java-library`, `maven-publish`; group `com.github.fabiopelliccia`,
@@ -190,7 +193,7 @@ Partial last line (no trailing `\n`, live session): drop the fragment, add a war
    languages, TASK.md §5.1).
 6. Format 1: unchanged, including "keep original folder".
 
-### 4.4 IntelliJ 1.1.0 changes
+### 4.4 IntelliJ 1.1.0 changes (dropped 2026-10-15)
 Submodule + includeBuild; delete local core sources/tests/core message keys; `UiBundle`; `PluginNamesTest`;
 `LogFiles`; import dialog forces "Attach" for format 2 (`ImportSessionsDialog.kt:83-95`); FOLDER column shows
 `projectName` for tokens (`SessionSelectionPanel.kt:88`); export notification reports anonymized paths and
@@ -221,19 +224,19 @@ rewrite, TASK.md constraint 3 and §4.6, CHANGELOG "archives from 1.1.0 need 1.1
 |---|---|---|---|
 | 0 | Repo skeleton: wrapper 9.7.1, root settings, `.gitignore`, LICENSE (MIT), CI `./gradlew build` | – | empty build green (Windows workaround) |
 | 1 | Move core + core tests here (same package), core build, bundle split (`MessageBundle`, `SessionPorterCoreBundle*` ×10), `ProducerInfo`, `LogFiles.rotate` | 0 | `./gradlew -p core test` green; no `com.intellij`; stdlib compileOnly |
-| 2 | IntelliJ repo on shared core: submodule, includeBuild, delete local core, `UiBundle`, `PluginNamesTest`, `LogFiles` | 1 | `test`, `verifyPlugin` (ALL), `buildPlugin`; ZIP lib has core+gson, no stdlib |
+| 2 | ~~IntelliJ repo on shared core~~ dropped 2026-10-15 (projects kept separate) | – | – |
 | 3 | Anonymization engine: `SourceIdentity`, `PathTokens`, `PathAnonymizer`, `PathDeanonymizer` (not wired) | 1 | unit tests for every style/boundary/collision/accent/cross-OS |
 | 4 | Export + manifest v2 (`FORMAT_VERSION=2`, `projectName`, summary, file history, partial line, stats) | 3 | archive-bytes privacy test green |
 | 5 | Import of format 2 (PathMapper roots/anchors, two passes, target required, check #14 ×10, test updates, v1 fixture) | 4 | whole §4.5 suite green; v1 fixture imports as before |
 | 6 | CLI (parser, commands, JSON, exit codes, PathInput, logs, reproducible shadow jar, UTF-8) | 1 (finish after 5) | in-process e2e on temp homes; `/c/...` target → `C--...`; exit codes 2/3/4/5; same SHA-256 across 2 clean builds |
 | 7 | Plugin + marketplace (manifests, launchers, two SKILL.md) | 6 | `claude plugin validate` passes; `claude --plugin-dir` export 1/4/>4, import with each policy, Java missing → JSON |
 | 8 | Release tooling + docs (`syncPluginJar`, release.yml SHA check, README, CHANGELOG, PRIVACY, THIRD_PARTY_NOTICES) | 7 | CI fails if committed jar ≠ sources |
-| 9 | IntelliJ 1.1.0 UI for format 2 (§4.4) | 5, 2 | CLI archive imports in IntelliJ and back; 1.0.0 refuses format 2 |
+| 9 | ~~IntelliJ 1.1.0 UI for format 2~~ dropped 2026-10-15 (IntelliJ ends at 1.0.1) | – | – |
 
 ## Risks
 1. Conversation text is rewritten (reverses TASK.md constraint 3): literal paths in code/test data change; base64,
    images, compressed data are not caught (binary files are only scanned). State it in README and PRIVACY.
-2. 1.0.0 cannot read format 2: ship IntelliJ 1.1.0 together with the CLI.
+2. IntelliJ 1.0.x cannot read format 2 (it refuses it cleanly): archives from the CLI/plugin need the Claude Code plugin.
 3. 8.3 detection is heuristic; bare user names outside paths are reported, not rewritten.
 4. To verify in WP7: `${CLAUDE_PLUGIN_ROOT}` substitution in skill text; marketplace plugins in the desktop Code
    tab; whether imported transcripts show in the desktop sidebar or only via `/resume`.
@@ -241,5 +244,5 @@ rewrite, TASK.md constraint 3 and §4.6, CHANGELOG "archives from 1.1.0 need 1.1
 6. Java 21 required (JBR fallback).
 7. Exporting the live session (partial-line trim + warning).
 8. Jar committed per release (no LFS); SHA check.
-9. core stdlib must stay `compileOnly` or the IDE plugin bundles a second stdlib.
-10. Submodule: bump the commit in the IntelliJ repo whenever core changes.
+9. core stdlib is `compileOnly` (WP1); the CLI bundles its own stdlib.
+10. ~~Submodule bump in the IntelliJ repo~~: no longer applies.

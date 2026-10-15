@@ -9,14 +9,14 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 |---|---|---|---|
 | 0 | Scheletro del repository | fatto | `09e6e2b`. Wrapper 9.7.1, `settings.gradle.kts` radice con solo `includeBuild("core")` (`:cli` lo aggiunge il WP6), CI `./gradlew -p core build`. |
 | 1 | Spostamento del core e split dei bundle | fatto | `5071f52`. 79 test verdi (`./gradlew -p core build` e `./gradlew build`). Vedi note WP1 sotto. |
-| 2 | IntelliJ sul core condiviso (submodule) | fatto | `ClaudeSessionRecover`, branch `feature/shared-core`, commit `1c09893` (submodule su `7086d36`). Verifica del 2026-10-15: `clean test buildPlugin verifyPlugin` verde (5 test, ripresi dalla cache di Gradle), `verifyPlugin` Compatible su IU-261.27258.48, IU-262.10968.63, IU-263.5153.40; `lib/` dello ZIP con core 2.0.0 e Gson 2.11.0, senza `kotlin-stdlib`. Senza merge né push. |
-| 3 | Motore di anonimizzazione | fatto, correzioni della review da applicare | `e84caec`. 126 test verdi (79 + 47 nuovi). Review Opus del 2026-10-15: 18 rilievi in [`REVIEW-WP3.md`](REVIEW-WP3.md), più il n. 19 (conteggio residuo con utente `root`/`home`) emerso nel WP5. Vedi note WP3 sotto. |
+| 2 | IntelliJ sul core condiviso (submodule) | abbandonato | Decisione del 2026-10-15: progetti distinti. Il branch `feature/shared-core` di `ClaudeSessionRecover` (commit `1c09893`, verificato verde) resta senza merge. IntelliJ si chiude con la 1.0.1 di sola sicurezza (`f346048`, preparata in locale). |
+| 3 | Motore di anonimizzazione | fatto | `e84caec`; correzioni dei 19 rilievi di [`REVIEW-WP3.md`](REVIEW-WP3.md) in `6a1b8e3`..`58400a7` (8 commit). 182 test verdi, nessuno saltato. Vedi note WP3 sotto. |
 | 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
-| 5 | Import del formato 2 | fatto | `a6605af`. 147 test, 0 falliti, 1 saltato (rilievo n. 19 della review WP3). Vedi note WP4/WP5 sotto. |
+| 5 | Import del formato 2 | fatto, correzioni della review da applicare | `a6605af`. Review Opus: 13 rilievi e lacune nei test in [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) (n. 1: scrittura fuori cartella tramite l'id di sessione). Vedi note WP4/WP5 sotto. |
 | 6 | CLI | da fare | |
 | 7 | Plugin Claude Code e marketplace | da fare | |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
-| 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | da fare | |
+| 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | annullato | Decisione del 2026-10-15: il plugin IntelliJ non avrà nuove versioni oltre la 1.0.1. |
 
 Limite concordato: ci si ferma ai **test locali**. Nessun repository GitHub, push o rilascio senza il
 proprietario.
@@ -26,6 +26,9 @@ proprietario.
 - 2026-10-14: plugin Claude Code + CLI Java 21 sul core Kotlin; export e import; progetto indipendente da
   IntelliJ; core condiviso via submodule (URL locale finché il repository GitHub non esiste);
   anonimizzazione completa, testo delle conversazioni incluso; stop ai test locali.
+- 2026-10-15: i due progetti restano **distinti**. Il plugin IntelliJ (`ClaudeSessionRecover`) è un progetto chiuso:
+  ultima versione 1.0.1 (solo sicurezza), nessun submodule sul core, WP2 abbandonato e WP9 annullato. Il core non deve
+  più restare compatibile con IntelliJ.
 
 ## Come riprendere
 
@@ -35,21 +38,20 @@ proprietario.
    (il `build` della radice esegue solo `buildEnvironment`: nessun task delega alla build inclusa; la CI usa `-p core build`).
 3. Riprendere dal primo WP non "fatto".
 
-### Ripresa (aggiornato il 2026-10-15)
+### Ripresa (aggiornato il 2026-10-15, pomeriggio)
 
-WP2, WP4 e WP5 fatti; review del WP3 fatta. Ordine (sviluppo con Sonnet, review con Opus, come da CLAUDE.md):
+WP3 (con le correzioni), WP4 e WP5 fatti; WP2 abbandonato, WP9 annullato. Ordine (sviluppo con Sonnet, review con Opus):
 
-1. **Correzioni della review del WP3** ([`REVIEW-WP3.md`](REVIEW-WP3.md), rilievi 1-19), con un test per ciascuna; togliere
-   l'`@Ignore` del rilievo 19 in `CrossMachineTransferTest`.
-2. In parallelo, **review del WP4/WP5** in sola lettura (`SessionExporter`, `SessionArchive`, `PathMapper`, `ImportDiagnostics`).
-3. Prima del WP9: aggiornare il submodule di `ClaudeSessionRecover` all'ultimo commit di `develops`.
-4. Poi WP6 (CLI), WP7 (plugin), WP8, WP9.
+1. **Correzioni della review di WP4/WP5** ([`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md), rilievi 1-13 e lacune nei test), con test
+   su archivi costruiti apposta.
+2. **WP6** (CLI), poi **WP7** (plugin Claude Code / Desktop), poi **WP8** (rilascio e documentazione).
 
 ## Bug trovati nel codice esistente
 
 | Data | Dove | Descrizione | Stato |
 |---|---|---|---|
 | 2026-10-14 | `ClaudeSessionRecover` `SessionArchive.readArchiveManifest` | un archivio prodotto da un altro strumento (export Copilot) faceva fallire l'import con `Parameter specified as non-null is null` | corretto in 0.0.5 |
+| 2026-10-15 | core `SessionArchive.readArchiveManifest` / import (anche IntelliJ 1.0.0) | l'id di sessione e `projectFolderName` del manifest non venivano controllati: un archivio costruito apposta (id `../../../../x`) scriveva file fuori dalla Claude home | IntelliJ: corretto in 1.0.1 (`f346048`, in locale); core: rilievo 1 di `REVIEW-WP4-WP5.md`, da correggere |
 | 2026-10-14 | `ClaudeSessionRecover` `ClaudeSessionsBundleTest` | i test sul bundle usavano la chiave UI `notification.action.showLog`, quindi non potevano vivere nel core | nel core puntano a `conflict.skip` (WP1) |
 
 ## Note WP1
@@ -116,6 +118,29 @@ Limiti noti:
 - La conversione dei separatori della coda è euristica: in testo libero un `\n` letterale dopo un percorso Windows verso POSIX diventa `/n`. Il nome utente fuori dai
   percorsi è solo contato (`residualUserNameHits`).
 - Un file di testo JSON (per esempio `.meta.json`) va con `anonymizeText`: i suoi percorsi sono `esc1` e tornano `esc1`, quindi coerenti.
+
+### Correzioni della review WP3 (2026-10-15)
+
+- Nuovi file interni: `AnchorMatcher.kt`, `PathNamePatterns.kt`, `PathNeedles.kt`. Nessuna firma cambiata.
+- `PathStyle` ha tre nuovi valori `REL`, `REL1`, `REL2` (token `rel`, `rel1`, `rel2`: home senza lettera di unità, per esempio
+  `HOMEPATH=\Users\alice`). Chi elenca o fa `when` sugli stili deve conoscerli.
+- `SourceIdentity`: nuove proprietà `shortStems` e `shortExtension` (8.3 di nomi con il punto: `alice.smith` → `ALICE~1.SMI`; si
+  accettano sia la radice secondo la regola Windows sia la vecchia `ALICES`). `claudeHome` resta anche quando sta sotto una radice.
+- Un'ancora di due o più cartelle non ha più controllo sul carattere che la precede (la privacy vince sull'ordine):
+  `/data/home/alice/x` diventa `/data{{SP:HOME:fwd}}/x`. Un'ancora di una sola cartella tiene i suoi bordi, allentati per flag `-I`,
+  colori ANSI e `\n`.
+- Le forme 8.3 di Git Bash, WSL, Cygwin, codificata e a otto backslash usano lo stile della forma lunga (`msys`, `wsl`, `cyg`, `enc`, `esc3`).
+- Chiavi in collisione: la seconda prende `~2`, `~3`, ... (`Stats.keyCollisions` ora conta le rinominate); all'import la chiave resta
+  numerata e quindi non corrisponde a un file reale.
+- `countResidualUserName` ignora i token dell'anonimizzatore; il controllo residuo guarda anche le parti del nome separate dal
+  punto (4+ caratteri).
+- `fwd` da sorgente Windows verso POSIX: la coda con backslash si converte solo se `sourceOs == WINDOWS`.
+- Prestazioni: la regex parte solo dove un'alternativa può iniziare. Test da 50 MB export + import: da circa 53 s a 6,2 s.
+- Limiti rimasti: nome utente nudo fuori dai percorsi solo contato; UTF-16BE e lettere ASCII percent-encoded (`%61lice`) non
+  riconosciuti; il fallback 8.3 richiede lettere ASCII e il fallback codificato `<drive>--Users-STEM-<n>` può scambiare una
+  cartella reale `alice\1` per la home 8.3; l'host di una share amministrativa (`\\ALICE-PC\c$`) resta, solo `\Users\alice`
+  diventa token; un nome di cartella codificato fatto di soli trattini (home `/Алиса`) non viene cercato; per nomi come `Zoë` gli
+  aghi sono deboli e quasi ogni riga passa dal parser (costo ormai piccolo).
 
 ## Note WP4/WP5
 
