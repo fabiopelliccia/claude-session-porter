@@ -13,8 +13,8 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 | 3 | Motore di anonimizzazione | fatto | `e84caec`; correzioni dei 19 rilievi di [`REVIEW-WP3.md`](REVIEW-WP3.md) in `6a1b8e3`..`58400a7` (8 commit). 182 test verdi, nessuno saltato. Vedi note WP3 sotto. |
 | 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
 | 5 | Import del formato 2 | fatto | `a6605af`; correzioni dei 13 rilievi e delle lacune nei test di [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) in `16e9cd5`..`cc89608` (9 commit). 247 test verdi, nessuno saltato. Vedi note WP4/WP5 sotto. |
-| 6 | CLI | fatto, review in corso | `98f8e6a`..`19b590f` (4 commit). `./gradlew build` dalla radice ora costruisce e testa core (247) e CLI (81), tutti verdi; CI su `./gradlew build` (non provata su Linux). Jar riproducibile: `session-porter.jar`, 2.595.811 byte, SHA-256 `0f94c25d…0c52b53b` uguale in due build pulite. Vedi note WP6 sotto. |
-| 7 | Plugin Claude Code e marketplace | da fare | |
+| 6 | CLI | fatto, correzioni della review in corso | `98f8e6a`..`19b590f` (4 commit). `./gradlew build` dalla radice costruisce e testa core (247) e CLI (81). Jar riproducibile `session-porter.jar` (2.595.811 byte, SHA-256 `0f94c25d…0c52b53b`). Review Opus: 13 rilievi in [`REVIEW-WP6.md`](REVIEW-WP6.md). Vedi note WP6 sotto. |
+| 7 | Plugin Claude Code e marketplace | fatto, prova interattiva del proprietario da fare | `5c720e1`. `claude plugin validate` (marketplace e plugin, anche `--strict`) superato; `plugin/tests/test-launchers.sh` 115/115 su Git Bash e pwsh. Jar in `plugin/lib/` escluso da git fino al WP8. Vedi note WP7 sotto. |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
 | 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | annullato | Decisione del 2026-10-15: il plugin IntelliJ non avrà nuove versioni oltre la 1.0.1. |
 
@@ -40,11 +40,13 @@ proprietario.
 
 ### Ripresa (aggiornato il 2026-10-15, pomeriggio)
 
-Core (WP1, WP3-WP5) e CLI (WP6) fatti; WP2 abbandonato, WP9 annullato. Ordine (sviluppo con Sonnet, review con Opus):
+Core, CLI (WP6) e plugin (WP7) fatti; WP2 abbandonato, WP9 annullato. In corso:
 
-1. **Review del WP6** (sola lettura) e, in parallelo, **WP7** (plugin Claude Code / Desktop, PLAN §3) sulla CLI così com'è;
-   poi le correzioni della review.
-2. Prova interattiva del plugin da parte del proprietario (`claude --plugin-dir`, poi la scheda Code di Claude Desktop).
+1. **Correzioni della review del WP6** ([`REVIEW-WP6.md`](REVIEW-WP6.md)) in `cli/` (e `LogFiles` del core), senza toccare `plugin/`
+   mentre il proprietario prova il plugin; le modifiche a launcher e skill che servono (rilievo 6) vanno applicate dopo la prova,
+   poi va ricopiato il jar in `plugin/lib/`.
+2. **Prova interattiva del proprietario**: `claude --plugin-dir ./plugin`, poi la scheda Code di Claude Desktop (passi in
+   "Note WP7").
 3. **WP8** (rilascio e documentazione).
 
 ## Bug trovati nel codice esistente
@@ -215,3 +217,20 @@ Limiti noti:
   `--verbose`; `--ids-file -` legge stdin UTF-8 (separatori virgola, spazio, a capo; `#` commento); per il conflitto usare
   `inspect.data.alreadyPresentIds`; in Git Bash `--target "$PWD"` va bene (la CLI converte `/c/...`); per riprendere usare
   `imported[].resumeCommand` dalla cartella `data.target`; la CLI scrive UTF-8 a prescindere dai flag della JVM.
+
+## Note WP7
+
+- Skill con namespace: `/session-porter:export-sessions` e `/session-porter:import-sessions` (`disable-model-invocation: true`).
+  `allowed-tools` limitato al launcher, scritto sia tra virgolette sia senza (Bash e PowerShell): da verificare nella prova se
+  il launcher parte senza richiesta di permesso.
+- Correzioni ai "plugin facts" di PLAN §3 (docs code.claude.com): nella scheda Code di Claude Desktop `+ > Plugins > Add plugin`
+  sfoglia solo i marketplace già configurati; il marketplace si aggiunge da terminale (`claude plugin marketplace add <percorso>`),
+  che condivide le impostazioni con l'app; i plugin non funzionano nelle sessioni cloud e WSL dell'app. Un marketplace locale con
+  sorgente relativa viene letto sul posto (il jar escluso da git funziona per la prova locale; da GitHub mancherebbe fino al WP8).
+- Scelte nello skill rispetto al piano: id passati con `--ids a,b,c` (oltre 200 con here-document) invece di `--ids-file -`, per
+  non avere una pipe da autorizzare; cartella corrente dal contesto dell'ambiente; Downloads come `"$HOME/Downloads/"`; percorsi
+  con barre dritte; sessione in corso riconosciuta con `${CLAUDE_SESSION_ID}` (sostituzione da verificare); con più progetti in un
+  archivio chiede se usare una sola cartella o importare progetto per progetto (la CLI accetta un solo `--target`).
+- Launcher: codice extra 4 `JAR_NOT_FOUND`; senza `--json` stampa testo su stderr. Avvio 2-3 s (soprattutto `java -XshowSettings`).
+- Da verificare solo con la prova interattiva: gli skill stessi, la sostituzione di `${CLAUDE_PLUGIN_ROOT}` e `${CLAUDE_SESSION_ID}`,
+  le regole di permesso, se le sessioni importate compaiono nella barra laterale dell'app o solo con `/resume` (rischio 4).
