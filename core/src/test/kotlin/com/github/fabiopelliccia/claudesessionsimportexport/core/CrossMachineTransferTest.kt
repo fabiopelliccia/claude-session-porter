@@ -713,27 +713,77 @@ class CrossMachineTransferTest {
     private fun projectDirOf(pc: Pc, root: String): Path =
         pc.home.resolve("projects").resolve(ClaudePaths.encodeProjectPath(root)).also { Files.createDirectories(it) }
 
+    /**
+     * What a real folder holds besides what [writePc1Session] plants: the account's email and git name where the
+     * redactor does not look (a `git log` in a tool result, in a `toolUseResult` and in a UTF-16LE file written by
+     * PowerShell), a path in the encodings of a URL (percent-encoded colon, `%5C` and `%2F` separators, a Cygwin
+     * mount), and one more file with NULs, `find -print0` style.
+     */
+    private fun plantTracesOfAlice(pc: Pc, root: String, id: String) {
+        val gitLog = "commit 1a2b3c\nAuthor: $aliceGitName <$aliceEmail>\n\n    fix\n\n    Co-Authored-By: $aliceGitName <$aliceEmail>\n"
+        val line = gson.toJson(
+            mapOf(
+                "type" to "user", "sessionId" to id, "cwd" to root, "timestamp" to "2024-03-10T09:10:00.000Z",
+                "message" to mapOf("role" to "user", "content" to "ok"), "toolUseResult" to mapOf("stdout" to gitLog),
+            ),
+        )
+        val transcript = transcriptOn(pc, root, id)
+        Files.writeString(transcript, Files.readString(transcript) + line + "\n")
+        val results = transcript.resolveSibling(id).resolve("tool-results")
+        Files.writeString(results.resolve("toolu_git.txt"), gitLog)
+        val bom = byteArrayOf(0xFF.toByte(), 0xFE.toByte())
+        Files.write(results.resolve("toolu_ps.txt"), bom + "C:\\Users\\alice\\notes.txt\r\n$gitLog".toByteArray(Charsets.UTF_16LE))
+        Files.write(results.resolve("toolu_zero.txt"), "C:\\Users\\alice\\a.kt\u0000C:\\Users\\alice\\b.kt\u0000".toByteArray())
+        plantLeakForms(
+            pc, root, id,
+            listOf(
+                "C%3A%5CUsers%5Calice%5Cdocs", "C:%5CUsers%5Calice%5Cdocs", "file:///C%3A/Users/alice/docs", "C%3A%2FUsers%2Falice%2Fdocs",
+                "/cygdrive/c/Users/alice/docs", "Users%5Calice", "users%2Falice", "C:\\\\Users\\\\alice\\\\docs",
+            ),
+        )
+    }
+
+    /**
+     * Every place of [archive] that an anonymization could have missed, looked at by a check that shares nothing with the
+     * engine: the entry name, the content as UTF-8 and as UTF-16LE (both alignments, which is how a Windows tool stores
+     * text). The path of a home in any separator, written in any case, and the user's bare name as a substring,
+     * which is a stricter reading than the engine's whole word.
+     */
+    private fun viewsOf(archive: Path): List<Pair<String, String>> = entriesOf(archive).flatMap { (name, bytes) ->
+        listOf(
+            name to name,
+            name to String(bytes, Charsets.UTF_8),
+            name to String(bytes, Charsets.UTF_16LE),
+            name to if (bytes.size > 1) String(bytes, 1, bytes.size - 1, Charsets.UTF_16LE) else "",
+        )
+    }
+
     @Test
     fun `the archive leaving PC_1 names alice in no path form`() {
         val pc1 = Pc("PC_1", "alice")
         val session = writePc1Session(pc1.home, "s-1", aliceRoot, "Aggiungi un test", forms = true)
+        plantTracesOfAlice(pc1, aliceRoot, "s-1")
         val archive = tmp.root.toPath().resolve("export.zip")
-        val outcome = exportFrom(pc1, listOf(session), archive)
+        val outcome = exportFrom(pc1, listOf(SessionScanner.listSessions(pc1.home).single { it.id == session.id }), archive)
         assertEquals(emptyList<String>(), outcome.warnings)
 
         val forbidden = listOf(
             "C:\\Users\\alice", "C:/Users/alice", "C:\\\\Users\\\\alice", "C:\\\\\\\\Users\\\\\\\\alice",
-            "/c/Users/alice", "/mnt/c/Users/alice", "ALICE~1", "C--Users-alice", "Users%5Calice",
+            "/c/Users/alice", "/mnt/c/Users/alice", "ALICE~1", "C--Users-alice", "Users%5Calice", "Users%2Falice", "%3A%5CUsers",
             aliceEmail, aliceGitName, "alice.rossi",
         )
         val entries = entriesOf(archive)
+        val planted = setOf(
+            "sessions/s-1/aux/tool-results/toolu_git.txt", "sessions/s-1/aux/tool-results/toolu_ps.txt", "sessions/s-1/aux/tool-results/toolu_zero.txt",
+            "sessions/s-1/aux/tool-results/toolu_leak.txt",
+        ) + (1..8).map { "sessions/s-1/file-history/leak@v$it" }
         assertEquals(
             setOf(
                 "manifest.json", "sessions/s-1/transcript.jsonl",
                 "sessions/s-1/aux/subagents/agent-a1.jsonl", "sessions/s-1/aux/subagents/agent-a1.meta.json",
                 "sessions/s-1/aux/tool-results/toolu_1.txt", "sessions/s-1/aux/tool-results/toolu_2.txt", "sessions/s-1/aux/tool-results/toolu_2.meta.json",
                 "sessions/s-1/file-history/main@v1", "sessions/s-1/file-history/main@v2", "sessions/s-1/file-history/main@v3", "sessions/s-1/file-history/docs@v1",
-            ),
+            ) + planted,
             entries.keys,
         )
         for ((name, bytes) in entries) {
@@ -744,17 +794,35 @@ class CrossMachineTransferTest {
             }
         }
 
+        // The same, with a check of its own (not the engine's patterns): a home in any separator and case, and the bare
+        // name counted exactly, in every entry name and in the UTF-8 and UTF-16LE view of every entry.
+        val homeInAnySeparator = Regex("users[\\\\/%5c2f]{1,8}alice", RegexOption.IGNORE_CASE)
+        val bareName = Regex("alice", RegexOption.IGNORE_CASE)
+        val views = viewsOf(archive)
+        for ((entry, view) in views) {
+            // The branch `users/alice/fix` is the bare name outside a path, planted on purpose and counted below.
+            assertFalse("$entry holds a home of alice", homeInAnySeparator.containsMatchIn(view.replace("users/alice/fix", "")))
+        }
+        // What stays is the bare name outside any path: the sentence "sono alice" and the branch `users/alice/fix`,
+        // which is in the transcript and in the manifest: three, and nowhere else.
+        val bareNames = views.sumOf { (_, view) -> bareName.findAll(view).count() }
+        assertEquals(views.filter { bareName.containsMatchIn(it.second) }.map { it.first }.toString(), 3, bareNames)
+        assertEquals(setOf("sessions/s-1/transcript.jsonl", "manifest.json"), views.filter { bareName.containsMatchIn(it.second) }.map { it.first }.toSet())
+
         // Every spelling that was planted was found, and each by the anchor that owns it.
-        assertEquals(
-            setOf("enc", "esc1", "esc2", "fwd", "msys", "short", "win", "wsl"),
-            outcome.replacedByStyle.keys,
+        assertTrue(
+            outcome.replacedByStyle.keys.toString(),
+            outcome.replacedByStyle.keys.containsAll(listOf("enc", "esc1", "esc2", "fwd", "msys", "short", "win", "wsl", "cyg", "url", "urlbs")),
         )
         assertEquals(setOf("HOME", "ROOT"), outcome.replacedByKind.keys)
-        // What stays is the bare name outside any path: a sentence and a branch (twice: transcript and manifest).
-        assertEquals(3, outcome.residualUserNameHits)
+        // The engine's own count agrees with the independent one.
+        assertEquals(bareNames, outcome.residualUserNameHits)
         assertEquals(listOf("sessions/s-1/transcript.jsonl", "manifest.json"), outcome.residualEntries)
         assertEquals(emptyList<String>(), outcome.binaryEntriesWithHits)
-        assertEquals(0, outcome.keyCollisions)
+        // Two of the planted keys (`C%3A%5C...` and `C:%5C...`) are the same home once anonymized: the second is renamed, and counted.
+        assertEquals(1, outcome.keyCollisions)
+        assertTrue(outcome.identityValuesScrubbed > 0)
+        assertTrue(outcome.hasPrivacyFindings) // the bare name is still there
 
         // The manifest: tokens for the paths, the project's own name, no source home.
         val manifest = SessionArchive.readArchiveManifest(archive)
@@ -1407,7 +1475,12 @@ class CrossMachineTransferTest {
         val seconds = (System.nanoTime() - started) / 1_000_000_000.0
 
         assertEquals(emptyList<ImportFailure>(), outcome.failures)
+        assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
         assertTrue("took $seconds s", seconds < 240)
         assertTrue(Files.size(transcriptOn(pc2, bobDemo, "s-1")) > 45L * 1024 * 1024)
+        // The tokens were rendered: not one is left, and the first of the big lines holds bob's home.
+        assertNoTokens(pc2.home)
+        val firstBigLine = Files.newBufferedReader(transcriptOn(pc2, bobDemo, "s-1")).useLines { lines -> lines.first { it.contains(filler) } }
+        assertTrue(firstBigLine.take(300), firstBigLine.contains(pc2.root.toString().replace("\\", "\\\\")))
     }
 }
