@@ -22,6 +22,9 @@ internal class AnchorPath private constructor(val drive: Char?, val segments: Li
 
     val leaf: String get() = segments.last()
 
+    /** The folder that holds this one, or `null` when this is already the top (a drive, a share, `/`). */
+    val parent: AnchorPath? get() = if (segments.size > 1) AnchorPath(drive, segments.dropLast(1), isUnc) else null
+
     /** The path as its own OS writes it: `C:\Users\alice`, `\\server\share\alice`, `/home/alice`. */
     val native: String
         get() = when {

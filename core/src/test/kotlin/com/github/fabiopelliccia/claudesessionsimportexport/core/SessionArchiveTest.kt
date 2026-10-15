@@ -21,6 +21,18 @@ class SessionArchiveTest {
     /** A Windows path only survives inside a JSON string with its backslashes escaped. */
     private fun String.asJsonString(): String = replace("\\", "\\\\")
 
+    /**
+     * Exports as the account whose paths these sessions hold, `C:\Users\fabio`. The identity is always given: the
+     * default one is read from the running machine, and the real `user.home` and TEMP of whoever runs the tests are
+     * never part of what a test expects.
+     */
+    private fun exportAsFabio(
+        sessions: List<SessionInfo>,
+        archive: Path,
+        home: Path,
+        producer: ProducerInfo = ProducerInfo(),
+    ): ExportOutcome = SessionArchive.export(sessions, archive, home = home, producer = producer, identity = SourceIdentity("C:\\Users\\fabio"))
+
     private fun writeSourceSession(home: java.nio.file.Path, id: String, cwd: String): SessionInfo {
         val projectDir = home.resolve("projects").resolve(ClaudePaths.encodeProjectPath(cwd))
         Files.createDirectories(projectDir)
@@ -45,7 +57,7 @@ class SessionArchiveTest {
         val session = writeSourceSession(sourceHome, "session-1", cwd)
 
         val archive = tmp.root.toPath().resolve("archive.zip")
-        val exportOutcome = SessionArchive.export(listOf(session), archive, home = sourceHome)
+        val exportOutcome = exportAsFabio(listOf(session), archive, home = sourceHome)
         assertEquals(1, exportOutcome.exportedCount)
         assertTrue(Files.exists(archive))
 
@@ -78,7 +90,7 @@ class SessionArchiveTest {
         val session = writeSourceSession(sourceHome, "session-2", cwd)
 
         val archive = tmp.root.toPath().resolve("archive2.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target2", ".claude").toPath()
         val first = SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
@@ -103,7 +115,7 @@ class SessionArchiveTest {
         val session = writeSourceSession(sourceHome, "session-4", sourceCwd)
 
         val archive = tmp.root.toPath().resolve("archive4.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         // Simulates a colleague importing the archive on another machine (different drive/user),
         // where the folder Claude Code encoded from the original `cwd` doesn't exist at all.
@@ -148,7 +160,7 @@ class SessionArchiveTest {
         val session = SessionScanner.listSessions(sourceHome).single()
 
         val archive = tmp.root.toPath().resolve("archive7.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target7", ".claude").toPath()
         val targetCwd = "D:\\Work\\Demo"
@@ -187,7 +199,7 @@ class SessionArchiveTest {
         val session = SessionScanner.listSessions(sourceHome).single()
 
         val archive = tmp.root.toPath().resolve("archive5.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target5", ".claude").toPath()
         SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
@@ -212,7 +224,7 @@ class SessionArchiveTest {
         val session = writeSourceSession(sourceHome, "session-6", cwd)
 
         val archive = tmp.root.toPath().resolve("archive6.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target6", ".claude").toPath()
         SessionArchive.import(archive, home = targetHome, shiftTimestampsToNow = false, targetProjectPath = cwd)
@@ -230,7 +242,7 @@ class SessionArchiveTest {
         val session = writeSourceSession(sourceHome, "session-3", cwd)
 
         val archive = tmp.root.toPath().resolve("archive3.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target3", ".claude").toPath()
         SessionArchive.import(archive, home = targetHome, targetProjectPath = cwd)
@@ -271,7 +283,7 @@ class SessionArchiveTest {
         val session = SessionScanner.listSessions(sourceHome).single()
 
         val archive = tmp.root.toPath().resolve("archive8.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         // Importing twice makes the second copy a duplicate, so all three fields get rewritten. The
         // target is given the way IntelliJ's `project.basePath` spells it, with forward slashes.
@@ -343,7 +355,7 @@ class SessionArchiveTest {
         val session = writeSessionWithHistory(sourceHome, "session-9", "C:\\Users\\fabio\\Demo9")
         assertTrue(session.hasFileHistory)
         val archive = tmp.root.toPath().resolve("archive9.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
         assertTrue(SessionArchive.readManifest(archive).single().hasFileHistory)
 
         val targetHome = tmp.newFolder("target9", ".claude").toPath()
@@ -371,7 +383,7 @@ class SessionArchiveTest {
         val sourceCwd = "C:\\Users\\fabio\\Demo10"
         val session = writeSessionWithHistory(sourceHome, "session-10", sourceCwd)
         val archive = tmp.root.toPath().resolve("archive10.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         // First restored into its own folder, then replaced into another one.
         val targetHome = tmp.newFolder("target10", ".claude").toPath()
@@ -393,7 +405,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source11", ".claude").toPath()
         val session = writeSourceSession(sourceHome, "session-11", "C:\\Users\\fabio\\Demo11")
         val archive = tmp.root.toPath().resolve("archive11.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val targetHome = tmp.newFolder("target11", ".claude").toPath()
         SessionArchive.import(archive, home = targetHome, targetProjectPath = "C:\\Users\\fabio\\Demo11")
@@ -407,7 +419,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source12", ".claude").toPath()
         val session = writeSessionWithHistory(sourceHome, "session-12", "C:\\Users\\fabio\\Demo12")
         val archive = tmp.root.toPath().resolve("archive12.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         // A folder that really exists on this machine, spelled the way IntelliJ hands it over.
         val folder = tmp.newFolder("work12").toPath().toAbsolutePath().toString().replace('\\', '/')
@@ -423,7 +435,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source13", ".claude").toPath()
         val session = writeSessionWithHistory(sourceHome, "session-13", "C:\\Users\\fabio\\Demo13", withBackupFile = false)
         val archive = tmp.root.toPath().resolve("archive13.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val folder = tmp.newFolder("work13").toPath().toAbsolutePath().toString()
         val targetHome = tmp.newFolder("target13", ".claude").toPath()
@@ -438,7 +450,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source14", ".claude").toPath()
         val session = writeSessionWithHistory(sourceHome, "session-14", "C:\\Users\\fabio\\Demo14")
         val archive = tmp.root.toPath().resolve("archive14.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val logFile = tmp.root.toPath().resolve("logs").resolve("import.log")
         val targetHome = tmp.newFolder("target14", ".claude").toPath()
@@ -466,7 +478,7 @@ class SessionArchiveTest {
         val missing = present.copy(id = "gone")
 
         val archive = tmp.root.toPath().resolve("archive15.zip")
-        val outcome = SessionArchive.export(listOf(present, missing), archive, home = sourceHome)
+        val outcome = exportAsFabio(listOf(present, missing), archive, home = sourceHome)
 
         assertEquals(1, outcome.exportedCount)
         assertEquals(1, outcome.warnings.size)
@@ -481,7 +493,7 @@ class SessionArchiveTest {
             writeSourceSession(sourceHome, "session-16b", "C:\\Users\\fabio\\Demo16"),
         )
         val archive = tmp.root.toPath().resolve("archive16.zip")
-        SessionArchive.export(sessions, archive, home = sourceHome)
+        exportAsFabio(sessions, archive, home = sourceHome)
 
         // A folder where the first transcript has to go makes writing it fail.
         val targetHome = tmp.newFolder("target16", ".claude").toPath()
@@ -511,7 +523,7 @@ class SessionArchiveTest {
         assertEquals("Migrate the build to Gradle 9", exported.displayName)
 
         val archive = tmp.root.toPath().resolve("archive17.zip")
-        SessionArchive.export(listOf(exported), archive, home = sourceHome)
+        exportAsFabio(listOf(exported), archive, home = sourceHome)
         assertEquals(exported.displayName, SessionArchive.readManifest(archive).single().displayName)
 
         // An archive written by an earlier build stores the raw preview it computed back then: the
@@ -579,7 +591,7 @@ class SessionArchiveTest {
         val session = SessionScanner.listSessions(sourceHome).single()
 
         val archive = tmp.root.toPath().resolve("archive18.zip")
-        val outcome = SessionArchive.export(listOf(session), archive, home = sourceHome)
+        val outcome = exportAsFabio(listOf(session), archive, home = sourceHome)
         assertEquals(1, outcome.redactedIdentityLines)
         assertEquals(1, outcome.redactedScratchpadPaths)
 
@@ -617,7 +629,7 @@ class SessionArchiveTest {
         )
 
         val archive = tmp.root.toPath().resolve("archive19.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val archived = readArchiveEntry(archive, "sessions/session-19/aux/subagents/agent-1.jsonl")
         assertFalse(archived.contains("fabio.pelliccia@example.com"))
@@ -628,7 +640,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source-p1", ".claude").toPath()
         val session = writeSourceSession(sourceHome, "session-p1", "C:\\Users\\fabio\\DemoP1")
         val archive = tmp.root.toPath().resolve("archive-p1.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         val manifest = SessionArchive.readArchiveManifest(archive)
         assertEquals(null, manifest.producerComponent)
@@ -646,7 +658,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source-p2", ".claude").toPath()
         val session = writeSourceSession(sourceHome, "session-p2", "C:\\Users\\fabio\\DemoP2")
         val archive = tmp.root.toPath().resolve("archive-p2.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome, producer = ProducerInfo("cli", "1.2.3"))
+        exportAsFabio(listOf(session), archive, home = sourceHome, producer = ProducerInfo("cli", "1.2.3"))
 
         val manifest = SessionArchive.readArchiveManifest(archive)
         assertEquals("cli", manifest.producerComponent)
@@ -659,7 +671,7 @@ class SessionArchiveTest {
         val sourceHome = tmp.newFolder("source20-fabio", ".claude").toPath()
         val session = writeSourceSession(sourceHome, "session-20", "C:\\Users\\fabio\\Demo20")
         val archive = tmp.root.toPath().resolve("archive20.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         assertEquals(null, SessionArchive.readArchiveManifest(archive).sourceHome)
     }
@@ -683,7 +695,7 @@ class SessionArchiveTest {
         val session = SessionScanner.listSessions(sourceHome).single()
 
         val archive = tmp.root.toPath().resolve("archive21.zip")
-        SessionArchive.export(listOf(session), archive, home = sourceHome)
+        exportAsFabio(listOf(session), archive, home = sourceHome)
 
         // "PC_2", used by bob: a fresh, unrelated home, on another drive, under another account.
         val targetHome = tmp.newFolder("pc2-bob-home", ".claude").toPath()

@@ -123,14 +123,15 @@ class PathAnonymizerTest {
     }
 
     @Test
-    fun `a relocated Claude home is an anchor and one below the home is not`() {
+    fun `a relocated Claude home is an anchor, and so is one below the home, which is longer and wins there`() {
         val relocated = SourceIdentity(home = home, claudeHome = """D:\claude-data""")
         assertEquals("""D:\claude-data""", relocated.claudeHome)
         assertEquals("""{{SP:CLAUDE_HOME:win}}\projects""", PathAnonymizer(relocated).anonymizeText("""D:\claude-data\projects"""))
 
         val inside = SourceIdentity(home = home, claudeHome = """C:\Users\alice\.claude""")
-        assertEquals(null, inside.claudeHome)
-        assertEquals("""{{SP:HOME:win}}\.claude\projects""", PathAnonymizer(inside).anonymizeText("""C:\Users\alice\.claude\projects"""))
+        assertEquals("""C:\Users\alice\.claude""", inside.claudeHome)
+        assertEquals("""{{SP:CLAUDE_HOME:win}}\projects""", PathAnonymizer(inside).anonymizeText("""C:\Users\alice\.claude\projects"""))
+        assertEquals("""{{SP:HOME:win}}\notes.txt""", PathAnonymizer(inside).anonymizeText("""C:\Users\alice\notes.txt"""))
     }
 
     @Test

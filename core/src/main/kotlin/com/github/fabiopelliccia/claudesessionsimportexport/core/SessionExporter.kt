@@ -56,6 +56,9 @@ internal class SessionExporter(
     private val totals = Totals()
     private val usedNames = HashSet<String>()
 
+    /** The operating systems the project paths of the exported sessions are written for. */
+    private val seenOs = linkedSetOf<PathOs>()
+
     /** What was prepared for one entry: its bytes and what the pass over them counted. */
     private class Prepared(
         val bytes: ByteArray,
@@ -130,6 +133,7 @@ internal class SessionExporter(
                     // Raw backups of the user's own files, never a transcript: never redacted.
                     copyDirectory(fileHistoryDir, SessionArchive.fileHistoryPrefix(session.id), zip, anonymizer, transcripts = false, session = session)
                 }
+                session.projectPath?.let { seenOs += PathOs.of(ClaudePaths.normalizeProjectPath(it)) }
                 exported += manifestEntry(session, anonymizer, main, auxDir.isDirectory(), fileHistoryDir.isDirectory())
             }
 
@@ -144,7 +148,7 @@ internal class SessionExporter(
                 anonymization = SessionArchive.AnonymizationInfo(
                     tokenPrefix = prefix,
                     kinds = totals.replacedByKind.keys.toList(),
-                    sourceOs = identity.os.name.lowercase(),
+                    sourceOs = sourceOs().name.lowercase(),
                 ),
             )
             writeRaw(zip, SessionArchive.MANIFEST_ENTRY, SessionArchive.toJson(manifest).toByteArray(StandardCharsets.UTF_8))
@@ -165,6 +169,13 @@ internal class SessionExporter(
             keyCollisions = totals.keyCollisions,
         )
     }
+
+    /**
+     * The operating system the paths of the archive are written for: the one of the project paths when every exported
+     * session agrees, otherwise the one of the identity (a Windows account exporting the Claude home of a WSL
+     * session has POSIX paths, which the home it runs from says nothing about).
+     */
+    private fun sourceOs(): PathOs = seenOs.singleOrNull() ?: identity.os
 
     // ------------------------------------------------------------------------------- manifest --
 
@@ -201,10 +212,10 @@ internal class SessionExporter(
         )
     }
 
-    /** The leaf of [root]; `null` when there is none or when it is the user's own name (root == home). */
+    /** The leaf of [root]; `null` when there is none or when it is a name of the user (root == home). */
     private fun projectNameOf(root: String?): String? {
         val leaf = root?.let { AnchorPath.parse(ClaudePaths.normalizeProjectPath(it))?.leaf } ?: return null
-        return leaf.takeUnless { it.equals(identity.userName, ignoreCase = true) }
+        return leaf.takeUnless { identity.isUserName(it) }
     }
 
     // --------------------------------------------------------------------------------- entries --

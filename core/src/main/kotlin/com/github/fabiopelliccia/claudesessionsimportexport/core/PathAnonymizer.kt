@@ -72,7 +72,7 @@ class PathAnonymizer(
         val candidates = mutableListOf<Pair<PathKind, AnchorPath>>()
         identity.roots.forEach { root -> AnchorPath.parse(root)?.let { candidates += PathKind.ROOT to it } }
         identity.claudeHome?.let { AnchorPath.parse(it) }?.let { candidates += PathKind.CLAUDE_HOME to it }
-        AnchorPath.parse(identity.home)?.let { candidates += PathKind.HOME to it }
+        identity.allHomes.forEach { home -> AnchorPath.parse(home)?.let { candidates += PathKind.HOME to it } }
 
         val seen = HashSet<String>()
         val anchors = candidates.filter { (_, path) -> seen.add(path.key) }
@@ -83,8 +83,9 @@ class PathAnonymizer(
             AnchorMatcher(kind, path, if (kind == PathKind.HOME) shorts else emptyList())
         }
         needles = needlesOf(anchors.map { it.second }, identity)
-        residual = residualPatternOf(identity.userName)
-        residualNeedles = PathNeedles.of(emptyList(), residualNamesOf(identity.userName), emptyList(), emptyList())
+        val residualNames = residualNamesFor(identity)
+        residual = residualPatternOf(residualNames)
+        residualNeedles = PathNeedles.of(emptyList(), residualNames, emptyList(), emptyList())
     }
 
     /**
@@ -221,8 +222,7 @@ class PathAnonymizer(
          * ordinary words. A dotted name (`alice.smith`, a corporate account) is looked for as a whole and
          * by each of its parts, since a conversation says "alice" more often than "alice.smith".
          */
-        fun residualPatternOf(userName: String): Pattern? {
-            val names = residualNamesOf(userName)
+        fun residualPatternOf(names: List<String>): Pattern? {
             if (names.isEmpty()) return null
             val alternatives = names.joinToString("|") { PathNamePatterns.plain(it) }
             return Pattern.compile("(?<![\\p{L}\\p{N}_])(?:$alternatives)(?![\\p{L}\\p{N}_])", Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE)
@@ -235,22 +235,31 @@ class PathAnonymizer(
             return listOf(userName) + parts
         }
 
+        /** [residualNamesOf] for every name of [identity]: the account, its other homes and its other names. */
+        fun residualNamesFor(identity: SourceIdentity): List<String> =
+            identity.allUserNames.flatMap { residualNamesOf(it) }.distinctBy { it.lowercase() }
+
         /**
          * The explicit 8.3 homes plus the generic `<drive>:\Users\<STEM>~<n>[.<EXT>]` fallback for each
          * stem of the identity (see [SourceIdentity.shortStems]), Windows only.
          */
         fun shortPatterns(identity: SourceIdentity): List<ShortPattern> {
-            if (identity.os != PathOs.WINDOWS) return emptyList()
+            val windowsHomes = identity.allHomes.withIndex().mapNotNull { (index, home) -> AnchorPath.parse(home)?.takeIf { it.isWindows }?.let { index to it } }
+            if (windowsHomes.isEmpty()) return emptyList()
             val list = mutableListOf<ShortPattern>()
             for (short in identity.shortHomes) {
                 val path = AnchorPath.parse(short) ?: continue
                 val drive = path.drive ?: continue
                 list += ShortPattern(drive.toString(), path.segments.map { Pattern.quote(it) }, Pattern.quote(ClaudePaths.encodeProjectPath(short)))
             }
-            // The folders above the home are spelled in full (`Users`): only the home's own name gets an 8.3 name.
-            val foldersAboveHome = AnchorPath.parse(identity.home)?.segments?.dropLast(1).orEmpty()
-            for (stem in identity.shortStems) {
-                list += genericShortPattern(foldersAboveHome, stem, identity.shortExtension)
+            for ((index, path) in windowsHomes) {
+                // The folders above the home are spelled in full (`Users`): only the home's own name gets an 8.3 name.
+                val foldersAboveHome = path.segments.dropLast(1)
+                // The first home is the identity's own (its user name may be given); the others are named by their folder.
+                val shortName = if (index == 0) SourceIdentity.ShortName(identity.shortStem, identity.shortExtension, identity.shortStems) else SourceIdentity.ShortName.of(path.leaf)
+                for (stem in shortName.stems) {
+                    list += genericShortPattern(foldersAboveHome, stem, shortName.extension)
+                }
             }
             return list
         }
@@ -269,8 +278,8 @@ class PathAnonymizer(
         fun needlesOf(anchors: List<AnchorPath>, identity: SourceIdentity): List<String> =
             PathNeedles.of(
                 anchors = anchors,
-                userNames = listOf(identity.userName) + residualNamesOf(identity.userName),
-                shortStems = identity.shortStems,
+                userNames = identity.allUserNames + residualNamesFor(identity),
+                shortStems = identity.shortStems + identity.otherHomes.flatMap { home -> AnchorPath.parse(home)?.let { SourceIdentity.ShortName.of(it.leaf).stems }.orEmpty() },
                 shortHomeLeaves = identity.shortHomes.mapNotNull { AnchorPath.parse(it)?.leaf },
             )
     }

@@ -176,8 +176,8 @@ class PathDeanonymizerTest {
         val homeProject = SourceIdentity(home = """C:\Users\alice""", claudeHome = """C:\Users\alice\.claude""", roots = listOf("""C:\Users\alice"""))
         assertEquals("""C:\Users\alice\.claude""", homeProject.claudeHome)
         assertEquals("""C:\Users\alice\.claude""", homeProject.withRoots(listOf("""C:\Users\alice""")).claudeHome)
-        // Without a root that holds it, a Claude home below the home is still no anchor.
-        assertEquals(null, homeProject.withRoots(listOf("""C:\Users\alice\IdeaProjects\X""")).claudeHome)
+        // Without a root that holds it, a Claude home below the home is an anchor all the same.
+        assertEquals("""C:\Users\alice\.claude""", homeProject.withRoots(listOf("""C:\Users\alice\IdeaProjects\X""")).claudeHome)
 
         val source = PathAnonymizer(homeProject)
         assertEquals("""{{SP:CLAUDE_HOME:win}}\projects\x and {{SP:ROOT:win}}\a.txt""", source.anonymizeText("""C:\Users\alice\.claude\projects\x and C:\Users\alice\a.txt"""))
@@ -376,10 +376,10 @@ class PathDeanonymizerTest {
     // ------------------------------------------------------------------------------ source identity --
 
     @Test
-    fun `an identity normalizes its values and drops a Claude home below the home`() {
+    fun `an identity normalizes its values and keeps a Claude home below the home`() {
         val identity = SourceIdentity(home = "C:/Users/alice/", claudeHome = """c:\users\ALICE\.claude""", roots = listOf("D:/work/demo/", "D:\\work\\demo"))
         assertEquals("""C:\Users\alice""", identity.home)
-        assertNull(identity.claudeHome)
+        assertEquals("""c:\users\ALICE\.claude""", identity.claudeHome)
         assertEquals(listOf("""D:\work\demo"""), identity.roots)
         assertEquals("alice", identity.userName)
         assertEquals("ALICE", identity.shortStem)
@@ -399,7 +399,7 @@ class PathDeanonymizerTest {
         )
         assertEquals(listOf("""C:\Users\ALICE~1"""), identity.shortHomes)
         assertEquals(listOf("""C:\Users\alice\p"""), identity.roots)
-        assertNull(identity.claudeHome)
+        assertEquals("""C:\Users\alice\.claude""", identity.claudeHome)
         assertEquals(listOf("""D:\r"""), identity.withRoots(listOf("""D:\r""")).roots)
     }
 
@@ -407,6 +407,7 @@ class PathDeanonymizerTest {
     fun `detect on the running machine names the real home without reading it back as a fixture`() {
         val identity = SourceIdentity.detect(claudeHome = Paths.get(System.getProperty("user.home"), ".claude"))
         assertEquals(ClaudePaths.normalizeProjectPath(System.getProperty("user.home")), identity.home)
-        assertNull(identity.claudeHome)
+        assertEquals(ClaudePaths.normalizeProjectPath(Paths.get(System.getProperty("user.home"), ".claude").toString()), identity.claudeHome)
+        assertEquals(emptyList<String>(), identity.otherHomes)
     }
 }
