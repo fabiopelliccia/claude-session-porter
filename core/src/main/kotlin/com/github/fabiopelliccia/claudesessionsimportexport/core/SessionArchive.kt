@@ -1,6 +1,7 @@
 package com.github.fabiopelliccia.claudesessionsimportexport.core
 
 import com.google.gson.GsonBuilder
+import com.github.fabiopelliccia.claudesessionsimportexport.core.UnusableArchiveException.Reason
 import com.google.gson.reflect.TypeToken
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -11,6 +12,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.ZipException
 import java.util.zip.ZipFile
 import kotlin.io.path.isDirectory
 import kotlin.io.path.isRegularFile
@@ -131,27 +133,35 @@ object SessionArchive {
         progress: TransferProgress = TransferProgress.NOOP,
         producer: ProducerInfo = ProducerInfo(),
         identity: SourceIdentity = SourceIdentity.detect(home),
-    ): ExportOutcome = SessionExporter(sessions, destination, home, progress, producer, identity).run()
+        labeler: SessionLabeler = SessionLabeler.TITLE,
+    ): ExportOutcome = SessionExporter(sessions, destination, home, progress, producer, identity, labeler = labeler).run()
 
     // ----------------------------------------------------------------------------- manifest --
 
     fun readManifest(archive: Path): List<SessionInfo> = readArchiveManifest(archive).sessions
 
+    /** The ZIP at [archive]; a file that is not a ZIP is an [UnusableArchiveException], not the raw `ZipException`. */
+    private fun openZip(archive: Path): ZipFile = try {
+        ZipFile(archive.toFile())
+    } catch (e: ZipException) {
+        throw UnusableArchiveException(Reason.NOT_A_ZIP, ClaudeSessionsBundle.message("error.notAnArchive"), e)
+    }
+
     fun readArchiveManifest(archive: Path): ArchiveManifest {
-        ZipFile(archive.toFile()).use { zip ->
+        openZip(archive).use { zip ->
             val entry = zip.getEntry(MANIFEST_ENTRY)
-                ?: throw IOException(ClaudeSessionsBundle.message("error.notAnArchive"))
+                ?: throw UnusableArchiveException(Reason.NO_MANIFEST, ClaudeSessionsBundle.message("error.notAnArchive"))
             val json = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
             val type = object : TypeToken<ArchiveManifest>() {}.type
             val manifest: ArchiveManifest = runCatching { gson.fromJson<ArchiveManifest>(json, type) }.getOrNull()
-                ?: throw IOException(ClaudeSessionsBundle.message("error.unreadableManifest"))
+                ?: throw UnusableArchiveException(Reason.UNREADABLE_MANIFEST, ClaudeSessionsBundle.message("error.unreadableManifest"))
             if (manifest.formatVersion > FORMAT_VERSION) {
-                throw IOException(ClaudeSessionsBundle.message("error.archiveTooNew", manifest.formatVersion, FORMAT_VERSION))
+                throw UnusableArchiveException(Reason.TOO_NEW, ClaudeSessionsBundle.message("error.archiveTooNew", manifest.formatVersion, FORMAT_VERSION))
             }
             // A format 2 archive without its token description, or with a prefix no token can be spelled
             // with, cannot be rendered for another machine.
             if (manifest.isAnonymized && !hasUsableAnonymization(manifest)) {
-                throw IOException(ClaudeSessionsBundle.message("error.unreadableManifest"))
+                throw UnusableArchiveException(Reason.UNREADABLE_MANIFEST, ClaudeSessionsBundle.message("error.unreadableManifest"))
             }
             // Gson fills a field missing from the JSON with null even when Kotlin declares it
             // non-null: an archive without a session list is read as an empty one.
@@ -184,7 +194,7 @@ object SessionArchive {
     @Suppress("SENSELESS_COMPARISON")
     private fun requireClaudeSession(session: SessionInfo?, producer: String?): SessionInfo {
         if (session == null || session.id == null || session.projectFolderName == null) {
-            throw IOException(ClaudeSessionsBundle.message("error.notClaudeArchive", producer ?: "?"))
+            throw UnusableArchiveException(Reason.NOT_CLAUDE, ClaudeSessionsBundle.message("error.notClaudeArchive", producer ?: "?"))
         }
         return session
     }
@@ -200,7 +210,7 @@ object SessionArchive {
     private fun requireSafeNames(session: SessionInfo, isAnonymized: Boolean): SessionInfo {
         val folderPattern = if (isAnonymized) PLAIN_OR_TOKEN_NAME else PLAIN_NAME
         val safe = isPlainName(session.id, PLAIN_NAME) && isPlainName(session.projectFolderName, folderPattern)
-        if (!safe) throw IOException(ClaudeSessionsBundle.message("error.unsafeArchive"))
+        if (!safe) throw UnusableArchiveException(Reason.UNSAFE, ClaudeSessionsBundle.message("error.unsafeArchive"))
         return session
     }
 
@@ -214,7 +224,7 @@ object SessionArchive {
         val normalizedBase = base.toAbsolutePath().normalize()
         val normalized = path.toAbsolutePath().normalize()
         if (normalized == normalizedBase || !normalized.startsWith(normalizedBase)) {
-            throw IOException(ClaudeSessionsBundle.message("error.unsafeArchive"))
+            throw UnusableArchiveException(Reason.UNSAFE, ClaudeSessionsBundle.message("error.unsafeArchive"))
         }
     }
 
@@ -277,6 +287,7 @@ object SessionArchive {
         log: ImportLog = ImportLog.NOOP,
         environment: ImportEnvironment = ImportEnvironment(),
         userHome: String = System.getProperty("user.home"),
+        labeler: SessionLabeler = SessionLabeler.TITLE,
     ): ImportOutcome {
         val startedAt = System.currentTimeMillis()
         val importedAt = Instant.now()
@@ -306,11 +317,11 @@ object SessionArchive {
             selected.forEachIndexed { index, session ->
                 progress.report(
                     index.toDouble() / selected.size,
-                    ClaudeSessionsBundle.message("progress.importingSession", session.displayName),
+                    ClaudeSessionsBundle.message("progress.importingSession", labeler.label(session)),
                 )
                 val sessionLog = log.child("Session ${session.id}")
                 try {
-                    val context = SingleImport(zip, session, conflictPolicy, attachedFolder, shiftTimestampsToNow, importedAt, home, existing, tokens)
+                    val context = SingleImport(zip, session, conflictPolicy, attachedFolder, shiftTimestampsToNow, importedAt, home, existing, tokens, labeler)
                     when (val result = importSingle(context, sessionLog, warnings)) {
                         null -> skipped += session.id
                         else -> {
@@ -352,6 +363,7 @@ object SessionArchive {
         val existing: Map<String, List<Path>>,
         /** How the tokens of a format 2 archive are rendered here; `null` for format 1. */
         val tokens: TokenRendering?,
+        val labeler: SessionLabeler,
     )
 
     /** Imports one session; returns `null` when it is skipped. */
@@ -367,7 +379,7 @@ object SessionArchive {
         val transcriptEntry = zip.getEntry(transcriptEntry(session.id))
         if (transcriptEntry == null) {
             log.line("transcript missing from the archive: skipped")
-            warnings += ClaudeSessionsBundle.message("import.warning.noTranscript", session.displayName)
+            warnings += ClaudeSessionsBundle.message("import.warning.noTranscript", context.labeler.label(session))
             return null
         }
 

@@ -56,6 +56,8 @@ internal class SessionExporter(
     private val largeFileBytes: Long = LARGE_FILE_BYTES,
     /** How a file is read into memory; a parameter so that a test can make it fail. */
     private val readBytes: (Path) -> ByteArray = Files::readAllBytes,
+    /** How the messages and the progress call a session: by its title, or only by its id. */
+    private val labeler: SessionLabeler = SessionLabeler.TITLE,
 ) {
 
     private val warnings = mutableListOf<String>()
@@ -156,7 +158,7 @@ internal class SessionExporter(
         sessions.forEachIndexed { index, session ->
             progress.report(
                 index.toDouble() / sessions.size,
-                ClaudeSessionsBundle.message("progress.exportingSession", session.displayName),
+                ClaudeSessionsBundle.message("progress.exportingSession", labeler.label(session)),
             )
             exportSession(zip, session, projectsDir, prefix)
         }
@@ -183,7 +185,7 @@ internal class SessionExporter(
         val projectDir = projectsDir.resolve(session.projectFolderName)
         val transcript = projectDir.resolve("${session.id}.jsonl")
         if (!transcript.isRegularFile()) {
-            warnings += ClaudeSessionsBundle.message("export.warning.noTranscript", session.displayName)
+            warnings += ClaudeSessionsBundle.message("export.warning.noTranscript", labeler.label(session))
             return
         }
         val anonymizer = PathAnonymizer(identity.withRoots(listOfNotNull(session.projectPath)), prefix)
@@ -193,7 +195,7 @@ internal class SessionExporter(
         val main = unlessUnreadable({ unreadableFile(session, transcript) }) { prepareTranscript(transcript, anonymizer) } ?: return
         if (main.isEmpty) {
             // Nothing but a fragment of a line (or nothing at all): a session that would import as an empty one.
-            warnings += ClaudeSessionsBundle.message("export.warning.emptySession", session.displayName)
+            warnings += ClaudeSessionsBundle.message("export.warning.emptySession", labeler.label(session))
             return
         }
         if (main.partialLineDropped) notePartialLine(session, TRANSCRIPT_NAME)
@@ -370,12 +372,12 @@ internal class SessionExporter(
 
     private fun unreadableFile(session: SessionInfo, file: Path) {
         unreadable++
-        warnings += ClaudeSessionsBundle.message("export.warning.unreadable", session.displayName, file)
+        warnings += ClaudeSessionsBundle.message("export.warning.unreadable", labeler.label(session), file)
     }
 
     private fun notePartialLine(session: SessionInfo, entry: String) {
         partialLinesDropped++
-        warnings += ClaudeSessionsBundle.message("export.warning.partialLine", session.displayName, entry)
+        warnings += ClaudeSessionsBundle.message("export.warning.partialLine", labeler.label(session), entry)
     }
 
     /** Writes [prepared] under [name], which is anonymized itself (a file may be called `C--Users-alice-x.txt`). */

@@ -151,3 +151,20 @@ data class ProducerInfo(
     val component: String? = null,
     val version: String? = null,
 )
+
+/**
+ * How the messages and the progress of an export or an import call a session. A front end that shows them
+ * to a person next to the sessions (the IDE) uses the title; one whose output may be stored or forwarded
+ * (the CLI) uses [ID], so that no conversation text leaves through them.
+ */
+fun interface SessionLabeler {
+    fun label(session: SessionInfo): String
+
+    companion object {
+        /** The title of the session, or its id when it has none. */
+        val TITLE = SessionLabeler { it.displayName }
+
+        /** The id of the session, never anything out of its conversation. */
+        val ID = SessionLabeler { it.id }
+    }
+}

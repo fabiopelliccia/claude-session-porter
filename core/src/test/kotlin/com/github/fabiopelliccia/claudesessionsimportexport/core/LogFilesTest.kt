@@ -29,16 +29,44 @@ class LogFilesTest {
 
     @Test
     fun `leaves other prefixes and other files alone`() {
-        touch("import-1.log", "import-2.log", "export-1.log", "export-2.log", "notes.txt", "import-3.txt")
+        touch(
+            "import-20260101-000001.log", "import-20260101-000002.log", "export-20260101-000001.log",
+            "export-20260101-000002.log", "notes.txt", "import-20260101-000003.txt",
+        )
         LogFiles.rotate(tmp.root.toPath(), "import", 1)
-        assertEquals(listOf("export-1.log", "export-2.log", "import-2.log", "import-3.txt", "notes.txt"), names())
+        assertEquals(
+            listOf("export-20260101-000001.log", "export-20260101-000002.log", "import-20260101-000002.log", "import-20260101-000003.txt", "notes.txt"),
+            names(),
+        )
+    }
+
+    @Test
+    fun `never touches a file that only looks like a log of the prefix`() {
+        // The folder may be shared with other things: 22 notes of a user named like our logs, and the newest real log.
+        val notes = (1..22).map { "export-notes-%02d.log".format(it) }
+        touch(*notes.toTypedArray(), "export-20260101-000001.log", "export-2026.log", "export-20260101-000001.log.bak")
+
+        LogFiles.rotate(tmp.root.toPath(), "export", 1)
+
+        assertEquals((notes + listOf("export-2026.log", "export-20260101-000001.log", "export-20260101-000001.log.bak")).sorted(), names())
+    }
+
+    @Test
+    fun `of logs of the same second the one with the higher counter is the newer`() {
+        touch(
+            "export-20260101-000001.log", "export-20260101-000001-2.log", "export-20260101-000001-10.log",
+            "export-20260101-000002.log",
+        )
+        LogFiles.rotate(tmp.root.toPath(), "export", 3)
+        // The oldest is the plain name of the first second, then -2, then -10, then the next second.
+        assertEquals(listOf("export-20260101-000001-10.log", "export-20260101-000001-2.log", "export-20260101-000002.log"), names())
     }
 
     @Test
     fun `does nothing under the limit and on a missing folder`() {
-        touch("import-1.log")
+        touch("import-20260101-000001.log")
         LogFiles.rotate(tmp.root.toPath(), "import", 5)
-        assertEquals(listOf("import-1.log"), names())
+        assertEquals(listOf("import-20260101-000001.log"), names())
 
         LogFiles.rotate(tmp.root.toPath().resolve("missing"), "import", 1)
         assertTrue(Files.exists(tmp.root.toPath()))
