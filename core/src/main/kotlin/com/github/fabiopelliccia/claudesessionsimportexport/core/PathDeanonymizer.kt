@@ -100,8 +100,14 @@ class PathDeanonymizer(
             PathStyle.REL -> withoutDrive(path, native, backslashesPerSeparator = 1)
             PathStyle.REL1 -> withoutDrive(path, native, backslashesPerSeparator = 2)
             PathStyle.REL2 -> withoutDrive(path, native, backslashesPerSeparator = 4)
+            PathStyle.REL_URL_BACKSLASH -> foldersJoined(path, native, "%5C")
+            PathStyle.REL_URL -> foldersJoined(path, native, "%2F")
         }
     }
+
+    /** `Users%5Cbob` for a destination `C:\Users\bob`: its folder names only, joined by [separator]. */
+    private fun foldersJoined(path: AnchorPath?, native: String, separator: String): String =
+        path?.segments?.joinToString(separator) ?: native
 
     /** `\Users\bob` for a destination `C:\Users\bob`, the path itself when it has no drive letter. */
     private fun withoutDrive(path: AnchorPath?, native: String, backslashesPerSeparator: Int): String {

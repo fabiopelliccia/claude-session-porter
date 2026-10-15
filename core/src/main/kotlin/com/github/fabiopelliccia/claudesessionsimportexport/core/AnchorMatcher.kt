@@ -160,6 +160,7 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
         const val ROOT_RELATIVE_LEAD = """\\++(?:u005[cC])?"""
 
         const val URL_SEPARATOR = "(?:/|%2[Ff])"
+        const val URL_ENCODED_SLASH = "%2[Ff]"
         const val URL_BACKSLASH_SEPARATOR = "%5[Cc]"
         const val URL_COLON = "(?::|%3[Aa])"
 
@@ -231,7 +232,10 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
                 // Percent-encoded: C%3A%5CUsers%5Calice, and C:/Users/alice or C%3A%2FUsers%2Falice
                 list += fixed(PathStyle.URL_BACKSLASH, urlBefore + drive + URL_COLON + chain(URL_BACKSLASH_SEPARATOR, urlNames) + AFTER_URL, startsWithDrive)
                 list += fixed(PathStyle.URL, urlBefore + drive + URL_COLON + chain(URL_SEPARATOR, urlNames) + AFTER_URL, startsWithDrive)
-                if (withoutDrive) list += withoutDriveAlternative(names)
+                if (withoutDrive) {
+                    list += withoutDriveAlternative(names)
+                    list += withoutDriveUrlAlternatives(path, urlNames)
+                }
             } else if (path.isUnc) {
                 // \\server\share\alice, //server/share/alice, \\?\UNC\server\share\alice, with doubled backslashes inside JSON
                 list += PathAlternative(UNC_LEAD + names.first() + chain(ANY_SEPARATOR, names.drop(1)) + AFTER, SLASH_OR_BACKSLASH_START) { match -> styleOfUncLead(match) }
@@ -259,6 +263,21 @@ internal class AnchorMatcher(val kind: PathKind, val path: AnchorPath, shortPatt
                     else -> PathStyle.REL2
                 }
             }
+
+        /**
+         * `Users%5Calice` and `Users%2Falice`: the home without its drive, percent-encoded, and without a separator in front
+         * (a separator written before it is not part of the match). Only an encoded separator: a plain slash would be any POSIX
+         * path. Left out for a home of one folder, which would be a plain word.
+         */
+        fun withoutDriveUrlAlternatives(path: AnchorPath, urlNames: List<String>): List<PathAlternative> {
+            if (path.segments.size < 2) return emptyList()
+            val first = path.segments.first().first().takeIf { it.code < ASCII_SIZE } ?: return emptyList()
+            val start = startingWith(first)
+            return listOf(
+                fixed(PathStyle.REL_URL_BACKSLASH, urlNames.first() + chain(URL_BACKSLASH_SEPARATOR, urlNames.drop(1)) + AFTER_URL, start),
+                fixed(PathStyle.REL_URL, urlNames.first() + chain(URL_ENCODED_SLASH, urlNames.drop(1)) + AFTER_URL, start),
+            )
+        }
 
         /** The style of a UNC lead: a slash is `fwd`, then two backslashes are `win`, four `esc1`, eight `esc2`, more `esc3`. */
         fun styleOfUncLead(text: String): PathStyle {

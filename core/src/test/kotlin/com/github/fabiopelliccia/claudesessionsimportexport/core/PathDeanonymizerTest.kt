@@ -142,6 +142,15 @@ class PathDeanonymizerTest {
     }
 
     @Test
+    fun `a percent-encoded home without its drive comes back as the destination's folders, in the same encoding`() {
+        assertEquals("Users%5Cbob", roundTrip("Users%5Calice"))
+        assertEquals("%5CUsers%5Cbob%5Cdocs", roundTrip("%5CUsers%5Calice%5Cdocs"))
+        assertEquals("p=Users%2Fbob%2Fdocs", roundTrip("p=Users%2Falice%2Fdocs"))
+        val mac = PathDeanonymizer(root = "/Users/bob/proj", home = "/Users/bob", claudeHome = "/Users/bob/.claude")
+        assertEquals("Users%5Cbob", roundTrip("Users%5Calice", to = mac))
+    }
+
+    @Test
     fun `a UNC home of the source comes back as the destination's home`() {
         val source = PathAnonymizer(SourceIdentity(home = """\\fileserver\users\alice"""))
         assertEquals("""C:\Users\bob\docs""", roundTrip("""\\fileserver\users\alice\docs""", source))

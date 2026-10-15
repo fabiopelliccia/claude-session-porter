@@ -43,6 +43,9 @@ enum class PathOs {
  * [REL], [REL1] and [REL2] are the home without its drive letter, at one, two and four backslashes per
  * separator: `HOMEPATH=\Users\alice`, or what follows the admin share in `\\localhost\c$\Users\alice`. It is
  * rendered as the destination's path without its drive, so whatever stood in front of it stays valid.
+ *
+ * [REL_URL_BACKSLASH] and [REL_URL] are the home without its drive in a percent-encoded form, and without a leading
+ * separator: `Users%5Calice` and `Users%2Falice`. A separator written in front of it stays where it is.
  */
 enum class PathStyle(
     val token: String,
@@ -67,6 +70,8 @@ enum class PathStyle(
     REL("rel", 1),
     REL1("rel1", 2),
     REL2("rel2", 4),
+    REL_URL_BACKSLASH("relurlbs"),
+    REL_URL("relurl"),
     ;
 
     companion object {

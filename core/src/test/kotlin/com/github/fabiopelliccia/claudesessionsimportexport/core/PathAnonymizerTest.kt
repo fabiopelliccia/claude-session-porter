@@ -521,6 +521,20 @@ class PathAnonymizerTest {
         assertEquals("""\Users\bob""", anonymizer.anonymizeText("""\Users\bob"""))
     }
 
+    // WP4/WP5 review, test gap 1: `Users%5Calice` (no drive, no colon) was never planted and was left behind.
+    @Test
+    fun `a home without its drive in a percent-encoded form is found, with or without the separator before it`() {
+        assertEquals("{{SP:HOME:relurlbs}}", anonymizer.anonymizeText("Users%5Calice"))
+        assertEquals("%5C{{SP:HOME:relurlbs}}%5Cdocs", anonymizer.anonymizeText("%5CUsers%5Calice%5Cdocs"))
+        assertEquals("x={{SP:HOME:relurl}}%2Fdocs", anonymizer.anonymizeText("x=users%2Falice%2Fdocs"))
+        // With its drive the longer form owns it; another user, or a longer name, is not the home.
+        assertEquals("{{SP:HOME:urlbs}}%5Cdocs", anonymizer.anonymizeText("C%3A%5CUsers%5Calice%5Cdocs"))
+        assertEquals("Users%5Cbob", anonymizer.anonymizeText("Users%5Cbob"))
+        assertEquals("Users%5Calice2", anonymizer.anonymizeText("Users%5Calice2"))
+        // A plain slash is any POSIX path: it is not read as the home of a Windows account.
+        assertEquals("/Users/alice/x", anonymizer.anonymizeText("/Users/alice/x"))
+    }
+
     @Test
     fun `finding 8 - a UNC home is an anchor in its plain, forward-slash and escaped spellings`() {
         val unc = PathAnonymizer(SourceIdentity(home = """\\fileserver\users\alice""", roots = listOf("""\\fileserver\users\alice\proj""")))
