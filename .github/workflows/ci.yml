@@ -26,6 +26,10 @@ jobs:
       - run: chmod +x gradlew
       # Builds and tests the core and the CLI, and builds cli/build/libs/session-porter.jar.
       - run: ./gradlew build
+      # The jar committed in plugin/lib/ (and its .sha256) must be the one these sources build.
+      - run: ./gradlew verifyPluginJar
+      # The launchers of the plugin run against that jar; the PowerShell part runs where pwsh is installed.
+      - run: sh plugin/tests/test-launchers.sh
       # The jar must be the same bytes on every system: its hash goes to the next job, which compares them.
       - run: sha256sum cli/build/libs/session-porter.jar | cut -d ' ' -f 1 > jar-sha256.txt
       - uses: actions/upload-artifact@v4
@@ -43,3 +47,15 @@ jobs:
       - run: |
           cat jar-sha256-*/jar-sha256.txt
           test "$(cat jar-sha256-*/jar-sha256.txt | sort -u | wc -l)" = 1
+
+  validate-plugin:
+    # The checks of Claude Code itself on the marketplace and on the plugin; they need no login.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: claude plugin validate --strict .
+      - run: claude plugin validate --strict plugin

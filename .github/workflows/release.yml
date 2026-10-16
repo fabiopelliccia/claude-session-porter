@@ -1,0 +1,56 @@
+name: Release
+
+# Pushing a tag such as 1.0.0 (no "v") publishes a GitHub Release with the jar of the plugin.
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: chmod +x gradlew
+
+      - name: The tag is the version of the plugin and of the CLI
+        run: |
+          plugin_version=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' plugin/.claude-plugin/plugin.json)
+          cli_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' cli/build.gradle.kts)
+          echo "tag $GITHUB_REF_NAME, plugin.json $plugin_version, cli/build.gradle.kts $cli_version"
+          test "$plugin_version" = "$GITHUB_REF_NAME"
+          test "$cli_version" = "$GITHUB_REF_NAME"
+
+      - name: The changelog describes this version
+        run: |
+          awk -v version="$GITHUB_REF_NAME" '
+            /^## \[/ { printing = index($0, "## [" version "]") == 1; next }
+            printing
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          cat release-notes.md
+
+      # Tests of the core and the CLI, then the committed jar against a fresh build of these sources.
+      - run: ./gradlew build verifyPluginJar
+      - run: cd plugin/lib && sha256sum --check session-porter.jar.sha256
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "The release $GITHUB_REF_NAME already exists; it is not overwritten." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "Session Porter $GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            plugin/lib/session-porter.jar plugin/lib/session-porter.jar.sha256
