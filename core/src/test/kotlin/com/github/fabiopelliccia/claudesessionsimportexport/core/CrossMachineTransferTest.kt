@@ -270,6 +270,13 @@ class CrossMachineTransferTest {
         return SessionScanner.listSessions(home).single { it.id == id }
     }
 
+    /**
+     * The separator the import writes between the parts of a path below [folder], [escapes] JSON levels
+     * deep: a Windows folder keeps its backslashes (doubled at each level), a POSIX one only has slashes.
+     */
+    private fun separator(folder: String, escapes: Int = 0): String =
+        if (ClaudePaths.isWindowsStyle(folder)) "\\".repeat(1 shl escapes) else "/"
+
     private fun linesOf(transcript: Path): List<JsonObject> =
         Files.readAllLines(transcript).filter { it.isNotBlank() }.map { JsonParser.parseString(it).asJsonObject }
 
@@ -380,7 +387,8 @@ class CrossMachineTransferTest {
         assertEquals(emptyList<String>(), traces(pc2.home, aliceGitName))
         // The conversation is anonymized with the rest: the path alice typed is bob's home on PC_2.
         val text = Files.readString(transcriptOn(pc2, bobDemo, "s-1"))
-        assertTrue(text.contains("Leggi anche ${pc2.root.toString().replace("\\", "\\\\")}\\\\note.txt"))
+        val home = pc2.root.toString()
+        assertTrue(text.contains("Leggi anche ${home.replace("\\", "\\\\")}${separator(home, 1)}note.txt"))
         assertTrue(text.contains("\"Aggiungi un test\""))
     }
 
@@ -1189,6 +1197,17 @@ class CrossMachineTransferTest {
 
     /** bob's home spelled in each of the forms [homeForms] plants, in the same order, as PC_2 renders them. */
     private fun bobForms(home: String): List<String> {
+        if (!ClaudePaths.isWindowsStyle(home)) {
+            // A POSIX home has no drive letter and no backslash: whatever alice's spelling was, the path comes
+            // back with slashes (Git Bash, WSL and the 8.3 form included), and only the folder name and the
+            // file URL are still spelled in their own way.
+            val docs = "$home/docs/a.txt"
+            return List(6) { docs } + listOf(
+                "$home/AppData/Local/Temp/x.txt",
+                "${ClaudePaths.encodeProjectPath(home)}-docs-a-txt",
+                "file://$docs",
+            )
+        }
         val forward = home.replace('\\', '/')
         val drive = home[0].lowercaseChar()
         val folders = home.substring(3).replace('\\', '/')
@@ -1224,6 +1243,9 @@ class CrossMachineTransferTest {
         assertNoTokens(pc2.home)
         val formsText = bobForms(home).joinToString(" | ")
         val escapedHome = home.replace("\\", "\\\\")
+        val sep = separator(home)
+        val sep1 = separator(home, 1)
+        val sep2 = separator(home, 2)
 
         val lines = linesOf(transcriptOn(pc2, bobDemo, "s-1"))
         fun message(prefix: String) = lines.mapNotNull { it.getAsJsonObject("message")?.get("content") }
@@ -1234,28 +1256,28 @@ class CrossMachineTransferTest {
         val rendered = lines.mapNotNull { it.getAsJsonArray("rendered") }.single { it.size() == 2 }[1].asJsonObject.get("content").asString
         assertEquals("<system-reminder>\nCartella: $formsText\n</system-reminder>", rendered)
         val edited = lines.mapNotNull { it.getAsJsonObject("attachment") }.single { it.get("type").asString == "edited_text_file" }
-        assertEquals("$home\\docs\\a.txt", edited.get("filename").asString)
+        assertEquals("$home${sep}docs${sep}a.txt", edited.get("filename").asString)
         assertEquals("1\t$formsText", edited.get("snippet").asString)
         // A key that is a path is renamed like a value.
         val tracked = lines.single { it.get("type").asString == "file-history-snapshot" }.getAsJsonObject("snapshot").getAsJsonObject("trackedFileBackups")
-        assertTrue(tracked.has("$home\\docs\\a.txt"))
-        assertEquals("$home\\docs", tracked.getAsJsonObject("$home\\docs\\a.txt").get("realParentDir").asString)
+        assertTrue(tracked.has("$home${sep}docs${sep}a.txt"))
+        assertEquals("$home${sep}docs", tracked.getAsJsonObject("$home${sep}docs${sep}a.txt").get("realParentDir").asString)
 
         // The auxiliary folder: text files, the JSON metadata (one escaping level down) and the subagent run.
         val aux = transcriptOn(pc2, bobDemo, "s-1").resolveSibling("s-1")
         assertEquals("$formsText\n", Files.readString(aux.resolve("tool-results/toolu_2.txt")))
-        assertEquals("""{"path":"$escapedHome\\docs\\a.txt","tool":"Read"}""", Files.readString(aux.resolve("tool-results/toolu_2.meta.json")))
+        assertEquals("""{"path":"$escapedHome${sep1}docs${sep1}a.txt","tool":"Read"}""", Files.readString(aux.resolve("tool-results/toolu_2.meta.json")))
         val subagent = Files.readAllLines(subagentOn(pc2, bobDemo, "s-1"))
-        val msys = "/${home[0].lowercaseChar()}/${home.substring(3).replace('\\', '/')}"
+        val msys = if (ClaudePaths.isWindowsStyle(home)) "/${home[0].lowercaseChar()}/${home.substring(3).replace('\\', '/')}" else home
         assertEquals(
-            """{"type":"user","text":"$escapedHome\\docs\\a.txt and ${escapedHome.replace("\\", "\\\\")}\\\\docs and $msys/docs""",
+            """{"type":"user","text":"$escapedHome${sep1}docs${sep1}a.txt and ${escapedHome.replace("\\", "\\\\")}${sep2}docs and $msys/docs""",
             subagent.last(),
         )
         val formsLine = JsonParser.parseString(subagent[subagent.size - 2]).asJsonObject
         assertEquals("Forme: $formsText", formsLine.getAsJsonObject("message").getAsJsonArray("content")[0].asJsonObject.get("text").asString)
         val history = pc2.home.resolve("file-history").resolve("s-1")
         assertEquals("// $formsText\n", Files.readString(history.resolve("main@v3")))
-        assertEquals("// copia di $home\\docs\\a.txt\n", Files.readString(history.resolve("docs@v1")))
+        assertEquals("// copia di $home${sep}docs${sep}a.txt\n", Files.readString(history.resolve("docs@v1")))
 
         // What stays is what was never a path: the bare name, in a sentence and in a branch.
         assertEquals(listOf("projects/${ClaudePaths.encodeProjectPath(bobDemo)}/s-1.jsonl"), traces(pc2.home, "alice").map { it.replace('\\', '/') })
@@ -1307,7 +1329,7 @@ class CrossMachineTransferTest {
         val outcome = SessionArchive.import(attached.receive(fixture, "a.zip"), home = attached.home, targetProjectPath = bobDemo)
         assertEquals(emptyList<FailedCheck>(), outcome.failedChecks)
         val canonical = ClaudePaths.normalizeProjectPath(bobDemo)
-        assertEquals(setOf(canonical, "$canonical\\src"), linesOf(transcriptOn(attached, bobDemo, "s-v1")).mapNotNull { it.get("cwd")?.asString }.toSet())
+        assertEquals(setOf(canonical, "$canonical${separator(canonical)}src"), linesOf(transcriptOn(attached, bobDemo, "s-v1")).mapNotNull { it.get("cwd")?.asString }.toSet())
         val results = transcriptOn(attached, bobDemo, "s-v1").resolveSibling("s-v1").resolve("tool-results/toolu_1.txt")
         assertEquals("Listing of $aliceRoot\n", Files.readString(results))
     }
@@ -1399,7 +1421,8 @@ class CrossMachineTransferTest {
         assertEquals(emptyList<FailedCheck>(), first.failedChecks)
         val text = Files.readString(transcriptOn(pc2, bobDemo, "s-out"))
         // The Claude home token becomes PC_2's Claude home, not bob's home.
-        assertTrue(text, text.contains("vedi ${claudeHome.replace("\\", "\\\\")}\\\\projects\\\\x"))
+        val sep1 = separator(claudeHome, 1)
+        assertTrue(text, text.contains("vedi ${claudeHome.replace("\\", "\\\\")}${sep1}projects${sep1}x"))
         assertNoTokens(pc2.home)
         assertEquals(emptyList<String>(), traces(pc2.home, "D:\\\\lavoro"))
 
@@ -1408,7 +1431,7 @@ class CrossMachineTransferTest {
         assertEquals(emptyList<FailedCheck>(), second.failedChecks)
         val canonical = ClaudePaths.normalizeProjectPath(bobDemo)
         val cwds = linesOf(transcriptOn(pc2, bobDemo, "s-home")).mapNotNull { it.get("cwd")?.asString }.toSet()
-        assertEquals(setOf(canonical, "$canonical\\src"), cwds)
+        assertEquals(setOf(canonical, "$canonical${separator(canonical)}src"), cwds)
         assertEquals(emptyList<String>(), traces(pc2.home, "alice"))
     }
 
@@ -1427,7 +1450,7 @@ class CrossMachineTransferTest {
         val home = pc2.root.toString()
         SessionArchive.import(pc2.receive(archive, "a.zip"), home = pc2.home, targetProjectPath = bobDemo, userHome = home)
         val content = linesOf(transcriptOn(pc2, bobDemo, "s-1")).last().getAsJsonObject("message").get("content").asString
-        assertEquals("C:\\Users\\alice2\\x C:\\Users\\alice.bak\\y $home\\z", content)
+        assertEquals("C:\\Users\\alice2\\x C:\\Users\\alice.bak\\y $home${separator(home)}z", content)
     }
 
     @Test
