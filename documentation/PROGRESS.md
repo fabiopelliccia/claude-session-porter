@@ -15,7 +15,7 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 | 5 | Import del formato 2 | fatto | `a6605af`; correzioni dei 13 rilievi e delle lacune nei test di [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) in `16e9cd5`..`cc89608` (9 commit). 247 test verdi, nessuno saltato. Vedi note WP4/WP5 sotto. |
 | 6 | CLI | fatto | `98f8e6a`..`19b590f`; correzioni dei 13 rilievi di [`REVIEW-WP6.md`](REVIEW-WP6.md) in `d59b8cd`..`5fe1b3b`. Test: core 254, CLI 123, tutti verdi; `./gradlew test` dalla radice ora esegue anche il core. Jar `session-porter.jar` 2.619.495 byte, SHA-256 `cbefc40a…2f31bbba59`, uguale in due build pulite e con checkout CRLF o LF. CI con job ubuntu e windows (mai eseguita: niente push). Vedi note WP6 sotto. |
 | 7 | Plugin Claude Code e marketplace | fatto; prova del proprietario con la CLI superata (2026-10-16), scheda Code di Claude Desktop da provare | `5c720e1`, `e2647e1` (argomenti in `SESSION_PORTER_ARGS`). `claude plugin validate` superato (anche `--strict`); `plugin/tests/test-launchers.sh` 130/130 su Git Bash e pwsh. Jar `cbefc40a…` in `plugin/lib/`, escluso da git fino al WP8. Vedi note WP7 sotto. |
-| 8 | Strumenti di rilascio e documentazione | da fare | |
+| 8 | Strumenti di rilascio e documentazione | fatto | `dc3d968`..`88b28df`; correzioni della review in `f16d806`, `278177f`. `syncPluginJar`/`verifyPluginJar`, jar `cbefc40a…` committato, CI (launcher e `claude plugin validate`), `release.yml` sui tag `x.y.z`, README, PRIVACY, CHANGELOG, THIRD_PARTY_NOTICES. Corretto un bug nei test dei launcher (cartella temporanea `/tmp` di Git Bash). Vedi "Pubblicazione" sotto. |
 | 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | annullato | Decisione del 2026-10-15: il plugin IntelliJ non avrà nuove versioni oltre la 1.0.1. |
 
 Limite concordato: ci si ferma ai **test locali**. Nessun repository GitHub, push o rilascio senza il
@@ -45,7 +45,10 @@ Core, CLI (WP6, con le correzioni) e plugin (WP7) fatti; WP2 abbandonato, WP9 an
 1. **Prova interattiva del proprietario**: con la CLI superata il 2026-10-16 (`claude --plugin-dir`, export della sessione
    in corso in `C:\Users\pelliccia\SessionPorterTest\export`, import in `...\target`, ripresa con `claude --resume`).
    Resta la scheda Code di Claude Desktop, che richiede il marketplace aggiunto da terminale.
-2. **WP8** (rilascio e documentazione), poi la pubblicazione scelta dal proprietario: vedi "Distribuzione" sotto.
+2. **WP8** fatto. Pubblicazione decisa dal proprietario il 2026-10-16: repository pubblico
+   `fabiopelliccia/claude-session-porter` (branch di default `main`, sviluppo su `develops`), tag `1.0.0`, GitHub Release
+   creata da `release.yml`; niente directory di Anthropic. Ordine: push di `main` e `develops`, CI verde su entrambi i
+   sistemi, poi push del tag e controllo della release e dell'installazione da GitHub.
 
 ### Distribuzione (documentazione ufficiale letta il 2026-10-16)
 
