@@ -14,7 +14,7 @@ aggiornato alla fine di ogni pacchetto di lavoro (WP).
 | 4 | Export e manifest formato 2 | fatto | `abf6184` (fixture formato 1 rigenerata dal codice formato 1, `formatVersion: 1`, sessione `s-v1` di alice) e `eac8629`. Vedi note WP4/WP5 sotto. |
 | 5 | Import del formato 2 | fatto | `a6605af`; correzioni dei 13 rilievi e delle lacune nei test di [`REVIEW-WP4-WP5.md`](REVIEW-WP4-WP5.md) in `16e9cd5`..`cc89608` (9 commit). 247 test verdi, nessuno saltato. Vedi note WP4/WP5 sotto. |
 | 6 | CLI | fatto | `98f8e6a`..`19b590f`; correzioni dei 13 rilievi di [`REVIEW-WP6.md`](REVIEW-WP6.md) in `d59b8cd`..`5fe1b3b`. Test: core 254, CLI 123, tutti verdi; `./gradlew test` dalla radice ora esegue anche il core. Jar `session-porter.jar` 2.619.495 byte, SHA-256 `cbefc40a…2f31bbba59`, uguale in due build pulite e con checkout CRLF o LF. CI con job ubuntu e windows (mai eseguita: niente push). Vedi note WP6 sotto. |
-| 7 | Plugin Claude Code e marketplace | fatto, prova interattiva del proprietario da fare | `5c720e1`, `e2647e1` (argomenti in `SESSION_PORTER_ARGS`). `claude plugin validate` superato (anche `--strict`); `plugin/tests/test-launchers.sh` 130/130 su Git Bash e pwsh. Jar `cbefc40a…` in `plugin/lib/`, escluso da git fino al WP8. Vedi note WP7 sotto. |
+| 7 | Plugin Claude Code e marketplace | fatto; prova del proprietario con la CLI superata (2026-10-16), scheda Code di Claude Desktop da provare | `5c720e1`, `e2647e1` (argomenti in `SESSION_PORTER_ARGS`). `claude plugin validate` superato (anche `--strict`); `plugin/tests/test-launchers.sh` 130/130 su Git Bash e pwsh. Jar `cbefc40a…` in `plugin/lib/`, escluso da git fino al WP8. Vedi note WP7 sotto. |
 | 8 | Strumenti di rilascio e documentazione | da fare | |
 | 9 | IntelliJ 1.1.0, interfaccia per il formato 2 | annullato | Decisione del 2026-10-15: il plugin IntelliJ non avrà nuove versioni oltre la 1.0.1. |
 
@@ -38,13 +38,28 @@ proprietario.
    (dal WP6 il `build` della radice costruisce e testa core e CLI).
 3. Riprendere dal primo WP non "fatto".
 
-### Ripresa (aggiornato il 2026-10-15, pomeriggio)
+### Ripresa (aggiornato il 2026-10-16)
 
 Core, CLI (WP6, con le correzioni) e plugin (WP7) fatti; WP2 abbandonato, WP9 annullato. Prossimi passi:
 
-1. **Prova interattiva del proprietario**: `claude --plugin-dir ./plugin`, poi la scheda Code di Claude Desktop (passi in
-   "Note WP7"); correggere quello che emerge.
-2. **WP8** (rilascio e documentazione).
+1. **Prova interattiva del proprietario**: con la CLI superata il 2026-10-16 (`claude --plugin-dir`, export della sessione
+   in corso in `C:\Users\pelliccia\SessionPorterTest\export`, import in `...\target`, ripresa con `claude --resume`).
+   Resta la scheda Code di Claude Desktop, che richiede il marketplace aggiunto da terminale.
+2. **WP8** (rilascio e documentazione), poi la pubblicazione scelta dal proprietario: vedi "Distribuzione" sotto.
+
+### Distribuzione (documentazione ufficiale letta il 2026-10-16)
+
+- **Marketplace su GitHub**: chi installa esegue `claude plugin marketplace add <owner>/<repo>` e
+  `claude plugin install session-porter@session-porter`; con `<owner>/<repo>#v1.0.0` si fissa un tag. Il jar va
+  committato in `plugin/lib/` (niente LFS: il clone non scarica i contenuti LFS). Per i marketplace di terze parti
+  l'aggiornamento automatico è spento: si aggiorna con `claude plugin marketplace update` e `claude plugin update`, e la
+  copia cambia solo se cambia `version` in `plugin.json`. Repository privato: servono le credenziali git dell'utente.
+- **Organizzazione Team/Enterprise**: impostazioni gestite (`extraKnownMarketplaces`, `enabledPlugins`) o sincronizzazione
+  del repository con l'organizzazione su claude.ai. Serve il ruolo Owner (il proprietario ha `organizationRole = user`).
+- **Directory pubblica di Anthropic**: invio da https://claude.ai/directory/manage con repository pubblico, validazione e
+  scansione di sicurezza a ogni versione. Anche qui serve un piano a pagamento con ruolo Owner.
+- La scheda Code di Claude Desktop condivide le impostazioni con la CLI: si aggiunge il marketplace da terminale, poi
+  `+ > Plugins > Add plugin`. I plugin non funzionano nelle sessioni cloud e WSL.
 
 ## Bug trovati nel codice esistente
 
