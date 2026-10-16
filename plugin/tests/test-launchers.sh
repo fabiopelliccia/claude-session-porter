@@ -12,6 +12,8 @@ plugin=$(cd "$here/.." && pwd)
 scratch=${1:-$(mktemp -d)}
 mkdir -p "$scratch" || exit 1
 scratch=$(cd "$scratch" && pwd)
+# Git Bash writes its temporary folder as /tmp/..., a path only its own tools understand: the Java CLI needs C:/...
+scratch=$(cd "$scratch" && { pwd -W 2>/dev/null || pwd; })
 cd "$scratch" || exit 1   # PowerShell may write session transcripts into the current folder: keep them out of the repository
 
 passed=0
