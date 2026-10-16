@@ -1,6 +1,6 @@
 {
   "name": "session-porter",
-  "description": "Move Claude Code sessions between computers: export them without any trace of your personal folders, import them on another PC.",
+  "description": "Move Claude Code sessions between computers: export them with your folder paths replaced by neutral markers, import them on another PC.",
   "owner": {
     "name": "Fabio Pelliccia"
   },

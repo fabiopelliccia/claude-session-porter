@@ -3,8 +3,8 @@
 Move your Claude Code sessions to another computer.
 
 - **Export** (`/session-porter:export-sessions`): you choose which of your sessions to export and get one ZIP
-  archive. The archive holds no reference to your personal folders (home folder, project folders, Claude folder):
-  they are replaced by neutral markers, also inside the conversation text.
+  archive. References to your home folder, project folders and Claude folder are replaced by neutral markers, also
+  inside the conversation text. What this cannot catch is described in `PRIVACY.md` at the root of the repository.
 - **Import** (`/session-porter:import-sessions`): the other user imports the archive on their computer. The sessions
   are attached to a folder they choose, and the paths in the conversations are rewritten for their computer. Then
   they resume a session with `claude --resume <id>` or `/resume` from that folder.
@@ -18,8 +18,7 @@ Both skills ask before they write anything. Import never runs on its own: only y
   - Windows: `winget install EclipseAdoptium.Temurin.21.JRE`
   - macOS: `brew install --cask temurin@21`
   - Linux (Debian/Ubuntu): `sudo apt install openjdk-21-jre`
-- On Windows the skills use the Bash tool (Git Bash, which Claude Code normally installs with it). Without it they
-  fall back to PowerShell.
+- On Windows the skills use the Bash tool when Git for Windows (Git Bash) is installed, and PowerShell otherwise.
 
 The launcher looks for Java in `SESSION_PORTER_JAVA`, then `JAVA_HOME`, then `PATH`, then the usual install
 folders (including the JDK bundled with IntelliJ). Set `SESSION_PORTER_JAVA` to the path of a `java` executable
@@ -34,7 +33,7 @@ uninstalling.
 **Claude Code CLI**
 
 ```text
-/plugin marketplace add fabiopelliccia/claude-session-porter   (or a local path such as ./ClaudeSessionPorter)
+/plugin marketplace add fabiopelliccia/claude-session-porter   (or a local path such as ./claude-session-porter)
 /plugin install session-porter@session-porter
 ```
 

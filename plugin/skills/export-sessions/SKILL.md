@@ -1,6 +1,6 @@
 ---
 name: export-sessions
-description: Export Claude Code sessions into one anonymized ZIP archive that another user can import on another computer. The archive holds no reference to the exporting user's folders. Use it when the user wants to export, back up, share or move their Claude Code sessions or conversations.
+description: Export Claude Code sessions into one anonymized ZIP archive that another user can import on another computer. References to the exporting user's home, project and Claude folders are replaced by neutral markers. Use it when the user wants to export, back up, share or move their Claude Code sessions or conversations.
 argument-hint: "[destination folder]"
 allowed-tools:
   - Bash("${CLAUDE_PLUGIN_ROOT}/scripts/session-porter" *)

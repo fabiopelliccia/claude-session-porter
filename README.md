@@ -5,8 +5,8 @@ Move your Claude Code sessions to another computer.
 Session Porter is a plugin for Claude Code (the CLI and the Code tab of the Claude desktop app). It has two skills:
 
 - **Export** (`/session-porter:export-sessions`): you choose which of your sessions to export and get one ZIP
-  archive. The archive holds no reference to your personal folders (your home folder, your project folders, the
-  Claude folder). They are replaced by neutral markers, also inside the conversation text.
+  archive. References to your home folder, your project folders and the Claude folder are replaced by neutral
+  markers, also inside the conversation text. What this cannot catch is described in [PRIVACY.md](PRIVACY.md).
 - **Import** (`/session-porter:import-sessions`): you, or someone else, import the archive on another computer. The
   sessions are attached to a folder chosen there, the paths in the conversations are rewritten for that computer,
   and the sessions can be resumed with `claude --resume <id>` or `/resume`.
@@ -21,8 +21,7 @@ an archive.
 - Claude Code (CLI or desktop app) with plugin support.
 - **Java 21 or later** on the computer. The plugin never installs Java. If it is missing, the skills tell you what to
   install.
-- Windows: the skills use the Bash tool (Git Bash, which Claude Code normally installs with it). Without it they
-  fall back to PowerShell.
+- Windows: the skills use the Bash tool when Git for Windows (Git Bash) is installed, and PowerShell otherwise.
 
 The plugin works in Claude Code on your computer only: not in the web version, and not in cloud or WSL sessions of
 the desktop app.
@@ -185,9 +184,9 @@ The jar is reproducible: the same sources give the same bytes on every system, w
 in `plugin/lib/` is not stale. After any change to the code, run `syncPluginJar` and commit `plugin/lib/` together
 with it.
 
-On Windows, Gradle can fail with `Unable to establish loopback connection` when the temporary folder has a short
-8.3 name (for example `C:\Users\LONGUS~1\AppData\Local\Temp`). In PowerShell, point Java's socket folder somewhere
-with a normal name and run Gradle again:
+On Windows, Gradle can fail with `Unable to establish loopback connection` on machines where Unix domain sockets
+in the temporary folder (`%TEMP%`) are blocked. In PowerShell, point Java's socket folder somewhere else and run
+Gradle again:
 
 ```text
 $env:JAVA_TOOL_OPTIONS = "-Djdk.net.unixdomain.tmpdir=$PWD\build\uds"
