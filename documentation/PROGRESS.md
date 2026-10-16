@@ -71,6 +71,7 @@ Core, CLI (WP6, con le correzioni) e plugin (WP7) fatti; WP2 abbandonato, WP9 an
 | 2026-10-14 | `ClaudeSessionRecover` `SessionArchive.readArchiveManifest` | un archivio prodotto da un altro strumento (export Copilot) faceva fallire l'import con `Parameter specified as non-null is null` | corretto in 0.0.5 |
 | 2026-10-15 | core `SessionArchive.readArchiveManifest` / import (anche IntelliJ 1.0.0) | l'id di sessione e `projectFolderName` del manifest non venivano controllati: un archivio costruito apposta (id `../../../../x`) scriveva file fuori dalla Claude home | IntelliJ: corretto in 1.0.1 (`f346048`, in locale); core: corretto in `16e9cd5` (`error.unsafeArchive`, `ArchiveSafetyTest`) |
 | 2026-10-14 | `ClaudeSessionRecover` `ClaudeSessionsBundleTest` | i test sul bundle usavano la chiave UI `notification.action.showLog`, quindi non potevano vivere nel core | nel core puntano a `conflict.skip` (WP1) |
+| 2026-10-16 | core `SessionArchive.resolveSafely` (import, trovato dalla CI su Linux) | il controllo zip-slip giudicava il nome di un'entry solo con le regole dell'OS che esegue: su Linux/macOS `aux/..\..\x` e `aux/C:/x` venivano scritti come file con backslash o due punti nel nome (dentro la Claude home, quindi nessuna fuga), su Windows venivano scartati; lo stesso archivio importava file diversi a seconda dell'OS | corretto in `966f235` (nome rifiutato se inizia con `/`, `\` o una lettera di unità, o ha un segmento `..` con entrambi i separatori); jar rigenerato in `d08d15e` |
 
 ## Note WP1
 
