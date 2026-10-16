@@ -29,9 +29,15 @@ jobs:
       # The jar committed in plugin/lib/ (and its .sha256) must be the one these sources build.
       - run: ./gradlew verifyPluginJar
       # The launcher tests need a machine without Java except the one they set up themselves, but the Linux runner image
-      # has JDKs in /usr/lib/jvm and /usr/bin/java, which the launcher finds. The JDK of setup-java is not touched.
+      # has JDKs in /usr/lib/jvm and /usr/bin/java, which the launcher finds. The JDK of setup-java may be a link into
+      # /usr/lib/jvm itself, so it is copied out first and used from there.
       - if: runner.os == 'Linux'
-        run: sudo mv /usr/lib/jvm /usr/lib/jvm.hidden && sudo rm -f /usr/bin/java
+        run: |
+          cp -RL "$JAVA_HOME" "$RUNNER_TEMP/jdk"
+          echo "JAVA_HOME=$RUNNER_TEMP/jdk" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/jdk/bin" >> "$GITHUB_PATH"
+          sudo mv /usr/lib/jvm /usr/lib/jvm.hidden
+          sudo rm -f /usr/bin/java
       # The launchers of the plugin run against that jar; the PowerShell part runs where pwsh is installed.
       - run: sh plugin/tests/test-launchers.sh
       # The jar must be the same bytes on every system: its hash goes to the next job, which compares them.
