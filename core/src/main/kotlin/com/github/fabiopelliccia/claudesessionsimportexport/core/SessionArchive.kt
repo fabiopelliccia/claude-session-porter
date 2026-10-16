@@ -70,6 +70,9 @@ object SessionArchive {
     /** A folder name of a format 2 archive may also be a token such as `{{SP:ROOT:enc}}`, which is never used as a path. */
     private val PLAIN_OR_TOKEN_NAME = Regex("[A-Za-z0-9._{}:~-]+")
 
+    /** The start of a Windows absolute path such as `C:/x` or `D:x`. */
+    private val DRIVE_PREFIX = Regex("^[A-Za-z]:")
+
     internal fun toJson(manifest: ArchiveManifest): String = gson.toJson(manifest)
 
     data class ArchiveManifest(
@@ -650,8 +653,15 @@ object SessionArchive {
         if (stats.keyCollisions > 0) log.kv("$name.keyCollisions", stats.keyCollisions)
     }
 
-    /** Guards against zip-slip: refuses any entry whose resolved path escapes [base]. */
+    /**
+     * Guards against zip-slip: refuses any entry whose resolved path escapes [base]. The name is judged
+     * with the rules of both OSes, not only of the one running: an archive imports the same files on
+     * Linux and macOS as on Windows, where `..\x` climbs up and `C:/x` is absolute. Judged by the host
+     * alone, a POSIX machine would write them as files with a backslash or a colon in their name.
+     */
     private fun resolveSafely(base: Path, relative: String): Path? {
+        if (relative.startsWith('/') || relative.startsWith('\\') || DRIVE_PREFIX.containsMatchIn(relative)) return null
+        if (relative.split('/', '\\').contains("..")) return null
         val resolved = base.resolve(relative).normalize()
         return if (resolved.startsWith(base.normalize())) resolved else null
     }
